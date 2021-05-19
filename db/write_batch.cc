@@ -135,11 +135,11 @@ class UpdTableInserter : public WriteBatch::Handler {
   UpdTable* upd_;
 
   void Put(const Slice& key, const Slice& value) override {
-    upd_->Add(sequence_, kTypeValue, key, value);
+    upd_->Add(sequence_, kTypeValue, key);
     sequence_++;
   }
   void Delete(const Slice& key) override {
-    upd_->Add(sequence_, kTypeDeletion, key, Slice());
+    upd_->Add(sequence_, kTypeDeletion, key);
     sequence_++;
   }
 };

@@ -73,15 +73,11 @@ class UpdTableIterator : public Iterator {
 
 Iterator* UpdTable::NewIterator() { return new UpdTableIterator(&table_); }
 
-void UpdTable::Add(SequenceNumber s, ValueType type, const Slice& key,
-                   const Slice& value) {
+void UpdTable::Add(SequenceNumber s, ValueType type, const Slice& key) {
   // Format of an entry is concatenation of:
   //  key_size     : varint32 of internal_key.size()
   //  key bytes    : char[internal_key.size()]
-  //  value_size   : varint32 of value.size()
-  //  value bytes  : char[value.size()]
   size_t key_size = key.size();
-  //size_t val_size = value.size();
   size_t internal_key_size = key_size + 8;
   const size_t encoded_len = VarintLength(internal_key_size) +
                              internal_key_size;
@@ -90,9 +86,6 @@ void UpdTable::Add(SequenceNumber s, ValueType type, const Slice& key,
   std::memcpy(p, key.data(), key_size);
   p += key_size;
   EncodeFixed64(p, (s << 8) | type);
-//   p += 8;
-//   p = EncodeVarint32(p, val_size);
-//   std::memcpy(p, value.data(), val_size);
   assert(p + 8 == buf + encoded_len);
   table_.Insert(buf);
   ++record_;

@@ -139,6 +139,7 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       background_work_finished_signal_(&mutex_),
       mem_(nullptr),
       upd_(nullptr),
+      divider(0),
       imm_(nullptr),
       has_imm_(false),
       logfile_(nullptr),
@@ -758,6 +759,10 @@ void DBImpl::BackgroundCompaction() {
     c->edit()->RemoveFile(c->level(), f->number);
     c->edit()->AddFile(c->level() + 1, f->number, f->file_size, f->smallest,
                        f->largest);
+    // update divider
+    if(c->level() == divider){
+      divider = c->level() + 1;
+    }
     status = versions_->LogAndApply(c->edit(), &mutex_);
     if (!status.ok()) {
       RecordBackgroundError(status);
@@ -769,6 +774,9 @@ void DBImpl::BackgroundCompaction() {
         status.ToString().c_str(), versions_->LevelSummary(&tmp));
   } else {
     CompactionState* compact = new CompactionState(c);
+    if(compact->compaction->level() == divider){
+      divider += 1;
+    }
     status = DoCompactionWork(compact);
     if (!status.ok()) {
       RecordBackgroundError(status);
@@ -1259,6 +1267,13 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
       }
       if (status.ok()) {
         status = WriteBatchInternal::InsertInto(write_batch, mem_, upd_);
+        if (upd_->isFull()){
+          printf("upd full. divider = %d \n", divider);
+          divider = 0;
+          upd_->Unref();
+          upd_ = new UpdTable(internal_comparator_, options_.upd_table_threshold);
+          upd_->Ref();
+        }
       }
       mutex_.Lock();
       if (sync_error) {

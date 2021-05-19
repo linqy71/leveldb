@@ -10,6 +10,7 @@
 #include "gtest/gtest.h"
 #include "db/dbformat.h"
 #include "db/memtable.h"
+#include "db/updtable.h"
 #include "db/write_batch_internal.h"
 #include "leveldb/db.h"
 #include "leveldb/env.h"
@@ -725,13 +726,15 @@ TEST(MemTableTest, Simple) {
   InternalKeyComparator cmp(BytewiseComparator());
   MemTable* memtable = new MemTable(cmp);
   memtable->Ref();
+  UpdTable* updtable = new UpdTable(cmp, 1000);
+  updtable->Ref();
   WriteBatch batch;
   WriteBatchInternal::SetSequence(&batch, 100);
   batch.Put(std::string("k1"), std::string("v1"));
   batch.Put(std::string("k2"), std::string("v2"));
   batch.Put(std::string("k3"), std::string("v3"));
   batch.Put(std::string("largekey"), std::string("vlarge"));
-  ASSERT_TRUE(WriteBatchInternal::InsertInto(&batch, memtable).ok());
+  ASSERT_TRUE(WriteBatchInternal::InsertInto(&batch, memtable, updtable).ok());
 
   Iterator* iter = memtable->NewIterator();
   iter->SeekToFirst();
@@ -743,6 +746,7 @@ TEST(MemTableTest, Simple) {
 
   delete iter;
   memtable->Unref();
+  updtable->Unref();
 }
 
 static bool Between(uint64_t val, uint64_t low, uint64_t high) {

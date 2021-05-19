@@ -19,6 +19,7 @@
 #include "db/log_reader.h"
 #include "db/log_writer.h"
 #include "db/memtable.h"
+#include "db/updtable.h"
 #include "db/table_cache.h"
 #include "db/version_set.h"
 #include "db/write_batch_internal.h"
@@ -137,6 +138,7 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       shutting_down_(false),
       background_work_finished_signal_(&mutex_),
       mem_(nullptr),
+      upd_(nullptr),
       imm_(nullptr),
       has_imm_(false),
       logfile_(nullptr),
@@ -164,6 +166,7 @@ DBImpl::~DBImpl() {
 
   delete versions_;
   if (mem_ != nullptr) mem_->Unref();
+  if (upd_ != nullptr) upd_->Unref();
   if (imm_ != nullptr) imm_->Unref();
   delete tmp_batch_;
   delete log_;
@@ -429,6 +432,7 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
   WriteBatch batch;
   int compactions = 0;
   MemTable* mem = nullptr;
+  UpdTable* upd = nullptr;
   while (reader.ReadRecord(&record, &scratch) && status.ok()) {
     if (record.size() < 12) {
       reporter.Corruption(record.size(),
@@ -441,7 +445,11 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
       mem = new MemTable(internal_comparator_);
       mem->Ref();
     }
-    status = WriteBatchInternal::InsertInto(&batch, mem);
+    if (upd == nullptr) {
+      upd = new UpdTable(internal_comparator_, options_.upd_table_threshold);
+      upd->Ref();
+    }
+    status = WriteBatchInternal::InsertInto(&batch, mem, upd);
     MaybeIgnoreError(&status);
     if (!status.ok()) {
       break;
@@ -473,6 +481,7 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
     assert(logfile_ == nullptr);
     assert(log_ == nullptr);
     assert(mem_ == nullptr);
+    assert(upd_ == nullptr);
     uint64_t lfile_size;
     if (env_->GetFileSize(fname, &lfile_size).ok() &&
         env_->NewAppendableFile(fname, &logfile_).ok()) {
@@ -487,6 +496,14 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
         mem_ = new MemTable(internal_comparator_);
         mem_->Ref();
       }
+
+      if(upd != nullptr){
+        upd_ = upd;
+        upd = nullptr;
+      } else {
+        upd_ = new UpdTable(internal_comparator_, options_.upd_table_threshold);
+        upd_->Ref();
+      }
     }
   }
 
@@ -497,6 +514,11 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
       status = WriteLevel0Table(mem, edit, nullptr);
     }
     mem->Unref();
+  }
+
+  if (upd != nullptr){
+    // upd did not get reused; delete it.
+    upd->Unref();
   }
 
   return status;
@@ -1236,7 +1258,7 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
         }
       }
       if (status.ok()) {
-        status = WriteBatchInternal::InsertInto(write_batch, mem_);
+        status = WriteBatchInternal::InsertInto(write_batch, mem_, upd_);
       }
       mutex_.Lock();
       if (sync_error) {
@@ -1433,6 +1455,9 @@ bool DBImpl::GetProperty(const Slice& property, std::string* value) {
     if (mem_) {
       total_usage += mem_->ApproximateMemoryUsage();
     }
+    if (upd_) {
+      total_usage += upd_->ApproximateMemoryUsage();
+    }
     if (imm_) {
       total_usage += imm_->ApproximateMemoryUsage();
     }
@@ -1502,6 +1527,11 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
       impl->log_ = new log::Writer(lfile);
       impl->mem_ = new MemTable(impl->internal_comparator_);
       impl->mem_->Ref();
+      if(impl->upd_ == nullptr){
+        impl->upd_ = new UpdTable(impl->internal_comparator_, options.upd_table_threshold);
+        impl->upd_->Ref();
+      }
+      
     }
   }
   if (s.ok() && save_manifest) {
@@ -1516,6 +1546,7 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
   impl->mutex_.Unlock();
   if (s.ok()) {
     assert(impl->mem_ != nullptr);
+    assert(impl->upd_ != nullptr);
     *dbptr = impl;
   } else {
     delete impl;

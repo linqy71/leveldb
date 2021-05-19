@@ -4,6 +4,7 @@
 
 #include "gtest/gtest.h"
 #include "db/memtable.h"
+#include "db/updtable.h"
 #include "db/write_batch_internal.h"
 #include "leveldb/db.h"
 #include "leveldb/env.h"
@@ -15,8 +16,10 @@ static std::string PrintContents(WriteBatch* b) {
   InternalKeyComparator cmp(BytewiseComparator());
   MemTable* mem = new MemTable(cmp);
   mem->Ref();
+  UpdTable* upd = new UpdTable(cmp, 1000);
+  upd->Ref();
   std::string state;
-  Status s = WriteBatchInternal::InsertInto(b, mem);
+  Status s = WriteBatchInternal::InsertInto(b, mem, upd);
   int count = 0;
   Iterator* iter = mem->NewIterator();
   for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
@@ -48,6 +51,7 @@ static std::string PrintContents(WriteBatch* b) {
     state.append("CountMismatch()");
   }
   mem->Unref();
+  upd->Unref();
   return state;
 }
 

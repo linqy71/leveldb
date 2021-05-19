@@ -144,6 +144,8 @@ target_sources(leveldb
     "db/snapshot.h"
     "db/table_cache.cc"
     "db/table_cache.h"
+    "db/updtable.h"
+    "db/updtable.cc"
     "db/version_edit.cc"
     "db/version_edit.h"
     "db/version_set.cc"
@@ -350,6 +352,7 @@ if(LEVELDB_BUILD_TESTS)
   leveldb_test("util/no_destructor_test.cc")
 
   if(NOT BUILD_SHARED_LIBS)
+    leveldb_test("dup_test/dup_test.cc")
     leveldb_test("db/autocompact_test.cc")
     leveldb_test("db/corruption_test.cc")
     leveldb_test("db/db_test.cc")

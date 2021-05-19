@@ -31,6 +31,7 @@
 #include "db/log_reader.h"
 #include "db/log_writer.h"
 #include "db/memtable.h"
+#include "db/updtable.h"
 #include "db/table_cache.h"
 #include "db/version_edit.h"
 #include "db/write_batch_internal.h"
@@ -179,6 +180,8 @@ class Repairer {
     WriteBatch batch;
     MemTable* mem = new MemTable(icmp_);
     mem->Ref();
+    UpdTable* upd = new UpdTable(icmp_, options_.upd_table_threshold);
+    upd->Ref();
     int counter = 0;
     while (reader.ReadRecord(&record, &scratch)) {
       if (record.size() < 12) {
@@ -187,7 +190,7 @@ class Repairer {
         continue;
       }
       WriteBatchInternal::SetContents(&batch, record);
-      status = WriteBatchInternal::InsertInto(&batch, mem);
+      status = WriteBatchInternal::InsertInto(&batch, mem, upd);
       if (status.ok()) {
         counter += WriteBatchInternal::Count(&batch);
       } else {
@@ -207,6 +210,8 @@ class Repairer {
     delete iter;
     mem->Unref();
     mem = nullptr;
+    upd->Unref();
+    upd = nullptr;
     if (status.ok()) {
       if (meta.file_size > 0) {
         table_numbers_.push_back(meta.number);

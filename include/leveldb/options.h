@@ -86,6 +86,8 @@ struct LEVELDB_EXPORT Options {
   // one open file per 2MB of working set).
   int max_open_files = 1000;
 
+  int upd_table_threshold = 100;
+
   // Control over blocks (user data is stored in a set of blocks, and
   // a block is the unit of reading from disk).
 

@@ -11,6 +11,7 @@
 #include "db/log_reader.h"
 #include "db/log_writer.h"
 #include "db/memtable.h"
+#include "db/updtable.h"
 #include "db/table_cache.h"
 #include "leveldb/env.h"
 #include "leveldb/table_builder.h"
@@ -492,6 +493,42 @@ int Version::PickLevelForMemTableOutput(const Slice& smallest_user_key,
     }
   }
   return level;
+}
+
+bool Version::OverlapInFile(FileMetaData* file, const Slice* smallest_user_key,
+    const Slice* largest_user_key){
+
+  const Comparator* ucmp = vset_->icmp_.user_comparator();
+
+  if (AfterFile(ucmp, smallest_user_key, file) ||
+        BeforeFile(ucmp, largest_user_key, file)) {
+    return false;
+  }
+
+  return true;
+
+}
+
+std::vector<FileMetaData*>  Version::OverlapFilesInLevel(int level, 
+    const Slice* smallest_user_key, const Slice* largest_user_key){
+
+  
+  std::vector<FileMetaData*> res;
+  if(level >= config::kNumLevels) return res; // level too deep
+  if(NumFiles(level) <= 0) return res; // level is empty
+  //printf("level %d, files %d \n", level, NumFiles(level));
+  for(int i = 0; i < NumFiles(level); i++){
+    if (OverlapInFile(files_[level][i], smallest_user_key, 
+        largest_user_key)){
+      res.push_back(files_[level][i]);
+    }
+  }
+  return res;
+
+}
+
+bool Version::UpdKeyHitInFile(FileMetaData* f, const Slice& k){
+  return vset_->table_cache_->KeyHitFilter(f->number, f->file_size, k);
 }
 
 // Store in "*inputs" all files in "level" that overlap [begin,end]

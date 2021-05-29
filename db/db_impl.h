@@ -26,6 +26,7 @@ class TableCache;
 class Version;
 class VersionEdit;
 class VersionSet;
+struct FileMetaData;
 
 class DBImpl : public DB {
  public:
@@ -49,6 +50,9 @@ class DBImpl : public DB {
   bool GetProperty(const Slice& property, std::string* value) override;
   void GetApproximateSizes(const Range* range, int n, uint64_t* sizes) override;
   void CompactRange(const Slice* begin, const Slice* end) override;
+
+  void ChooseFileAndComp(int level);
+  void CompactRangeFromLevel(int level, const Slice* begin, const Slice* end);
 
   // Extra methods (for testing) that are not in the public DB interface
 

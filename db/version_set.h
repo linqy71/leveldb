@@ -33,6 +33,7 @@ class Writer;
 class Compaction;
 class Iterator;
 class MemTable;
+class UpdateTable;
 class TableBuilder;
 class TableCache;
 class Version;
@@ -104,6 +105,15 @@ class Version {
   bool OverlapInLevel(int level, const Slice* smallest_user_key,
                       const Slice* largest_user_key);
 
+  bool OverlapInFile(FileMetaData* file, const Slice* smallest,
+    const Slice* largest);
+  
+  std::vector<FileMetaData*> OverlapFilesInLevel(int level, 
+    const Slice* smallest_user_key,
+    const Slice* largest_user_key);
+
+  bool UpdKeyHitInFile(FileMetaData* f, const Slice& k);
+  
   // Return the level at which we should place a new memtable compaction
   // result that covers the range [smallest_user_key,largest_user_key].
   int PickLevelForMemTableOutput(const Slice& smallest_user_key,

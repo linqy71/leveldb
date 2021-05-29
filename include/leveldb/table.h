@@ -19,6 +19,7 @@ struct Options;
 class RandomAccessFile;
 struct ReadOptions;
 class TableCache;
+class FilterBlockReader;
 
 // A Table is a sorted map from strings to strings.  Tables are
 // immutable and persistent.  A Table may be safely accessed from
@@ -72,6 +73,8 @@ class LEVELDB_EXPORT Table {
   Status InternalGet(const ReadOptions&, const Slice& key, void* arg,
                      void (*handle_result)(void* arg, const Slice& k,
                                            const Slice& v));
+  
+  bool HitFilter(const Slice& k);
 
   void ReadMeta(const Footer& footer);
   void ReadFilter(const Slice& filter_handle_value);

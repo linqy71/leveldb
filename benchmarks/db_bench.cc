@@ -121,6 +121,8 @@ static bool FLAGS_reuse_logs = false;
 // Use the db with the following name.
 static const char* FLAGS_db = nullptr;
 
+static int FLAGS_upd_threshold = -1;
+
 namespace leveldb {
 
 namespace {
@@ -765,6 +767,7 @@ class Benchmark {
     options.write_buffer_size = FLAGS_write_buffer_size;
     options.max_file_size = FLAGS_max_file_size;
     options.block_size = FLAGS_block_size;
+    options.upd_table_threshold = FLAGS_upd_threshold;
     if (FLAGS_comparisons) {
       options.comparator = &count_comparator_;
     }
@@ -1069,6 +1072,8 @@ int main(int argc, char** argv) {
       FLAGS_open_files = n;
     } else if (strncmp(argv[i], "--db=", 5) == 0) {
       FLAGS_db = argv[i] + 5;
+    } else if (sscanf(argv[i], "--upd_thres=%d%c", &n, &junk) == 1) {
+      FLAGS_upd_threshold = n;
     } else {
       std::fprintf(stderr, "Invalid flag '%s'\n", argv[i]);
       std::exit(1);

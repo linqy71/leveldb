@@ -22,6 +22,7 @@
 #include "db/updtable.h"
 #include "db/table_cache.h"
 #include "db/version_set.h"
+#include "db/version_edit.h"
 #include "db/write_batch_internal.h"
 #include "leveldb/db.h"
 #include "leveldb/env.h"
@@ -446,7 +447,7 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
       mem = new MemTable(internal_comparator_);
       mem->Ref();
     }
-    if (upd == nullptr) {
+    if (upd == nullptr && options_.upd_table_threshold != -1) {
       upd = new UpdTable(internal_comparator_, options_.upd_table_threshold);
       upd->Ref();
     }
@@ -614,6 +615,23 @@ void DBImpl::CompactRange(const Slice* begin, const Slice* end) {
     }
   }
   TEST_CompactMemTable();  // TODO(sanjay): Skip if memtable does not overlap
+  for (int level = 0; level < max_level_with_files; level++) {
+    TEST_CompactRange(level, begin, end);
+  }
+}
+
+void DBImpl::CompactRangeFromLevel(int start_level, const Slice* begin, const Slice* end) {
+  int max_level_with_files = -1;
+  {
+    MutexLock l(&mutex_);
+    Version* base = versions_->current();
+    for (int level = start_level; level < config::kNumLevels; level++) {
+      if (base->OverlapInLevel(level, begin, end)) {
+        max_level_with_files = level;
+      }
+    }
+  }
+  //TEST_CompactMemTable();  // TODO(sanjay): Skip if memtable does not overlap
   for (int level = 0; level < max_level_with_files; level++) {
     TEST_CompactRange(level, begin, end);
   }
@@ -1267,8 +1285,13 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
       }
       if (status.ok()) {
         status = WriteBatchInternal::InsertInto(write_batch, mem_, upd_);
-        if (upd_->isFull()){
-          printf("upd full. divider = %d \n", divider);
+        if (upd_ != nullptr && upd_->isFull()){
+          //printf("upd full. divider = %d \n", divider);
+          
+          //divider = 1; // test, set to 1
+          
+          ChooseFileAndComp(divider + 1);
+          
           divider = 0;
           upd_->Unref();
           upd_ = new UpdTable(internal_comparator_, options_.upd_table_threshold);
@@ -1305,6 +1328,67 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
   }
 
   return status;
+}
+
+
+
+// start from level
+// caculate bloom ratio of every sst
+// return the file whose ratio is the highest
+void DBImpl::ChooseFileAndComp(int level){
+  Version* v = versions_->current();
+  v->Ref();
+
+  //find overlap
+  Iterator* iter = upd_->NewIterator();
+  iter->SeekToFirst();
+  Slice small = iter->key(); // internal key
+  Slice small_user_key = ExtractUserKey(small);
+  iter->SeekToLast();
+  Slice large = iter->key();
+  Slice large_user_key = ExtractUserKey(large);
+
+  std::vector<FileMetaData*> overlaps = v->OverlapFilesInLevel(level, 
+                              &small_user_key, &large_user_key);
+  //printf("overlap file %d \n", overlaps.size());
+
+  double max_ratio = 0.0;
+  FileMetaData* target = nullptr;
+  // may take lots of time
+  for(int i = 0; i < overlaps.size(); i++){
+    FileMetaData* curFile = overlaps[i];
+    //printf("curFile small user key: %s \n", curFile->smallest.user_key().data());
+    //printf("curFile large user key: %s \n", curFile->largest.user_key().data());
+    iter->SeekToFirst();
+
+    int est_key_num = curFile->file_size / (4*1024) * 40;
+
+    int hit_keys = 0;
+    while(iter->Valid()){
+      Slice ikey = iter->key();
+      bool hit = v->UpdKeyHitInFile(curFile, ikey);
+      if(hit) hit_keys++;
+      iter->Next();
+    }
+
+    double hit_ratio = (double) hit_keys * 1.0 / est_key_num;
+    if (hit_ratio > max_ratio) {
+      target = curFile;
+      max_ratio = hit_ratio;
+    }
+  }
+
+  //do compaction
+  if(target != nullptr){
+    Slice s = target->smallest.user_key();
+    Slice l = target->largest.user_key();
+    //CompactRangeFromLevel(divider + 1, &s, &l);
+    CompactRangeFromLevel(2, &s, &l);
+  }
+
+  delete iter;
+  v->Unref();
+
 }
 
 // REQUIRES: Writer list must be non-empty
@@ -1542,7 +1626,7 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
       impl->log_ = new log::Writer(lfile);
       impl->mem_ = new MemTable(impl->internal_comparator_);
       impl->mem_->Ref();
-      if(impl->upd_ == nullptr){
+      if(impl->upd_ == nullptr && options.upd_table_threshold != -1){
         impl->upd_ = new UpdTable(impl->internal_comparator_, options.upd_table_threshold);
         impl->upd_->Ref();
       }
@@ -1561,7 +1645,6 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
   impl->mutex_.Unlock();
   if (s.ok()) {
     assert(impl->mem_ != nullptr);
-    assert(impl->upd_ != nullptr);
     *dbptr = impl;
   } else {
     delete impl;

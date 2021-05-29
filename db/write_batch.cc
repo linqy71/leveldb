@@ -147,18 +147,18 @@ class UpdTableInserter : public WriteBatch::Handler {
 }  // namespace
 
 Status WriteBatchInternal::InsertInto(const WriteBatch* b, MemTable* memtable, UpdTable* updtable) {
-  UpdTableInserter updinserter;
-  updinserter.sequence_ = WriteBatchInternal::Sequence(b);
-  updinserter.upd_ = updtable;
-  Status s = b->Iterate(&updinserter);
-  if(s.ok()){
-    MemTableInserter inserter;
-    inserter.sequence_ = WriteBatchInternal::Sequence(b);
-    inserter.mem_ = memtable;
-    return b->Iterate(&inserter);
-  } else {
-    return s;
+  if(updtable != nullptr) {
+    UpdTableInserter updinserter;
+    updinserter.sequence_ = WriteBatchInternal::Sequence(b);
+    updinserter.upd_ = updtable;
+    Status s = b->Iterate(&updinserter);
+    if(!s.ok()) return s;
   }
+  MemTableInserter inserter;
+  inserter.sequence_ = WriteBatchInternal::Sequence(b);
+  inserter.mem_ = memtable;
+  return b->Iterate(&inserter);
+  
 }
 
 void WriteBatchInternal::SetContents(WriteBatch* b, const Slice& contents) {

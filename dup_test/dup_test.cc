@@ -15,7 +15,7 @@ public:
         options.create_if_missing = true;
 	    options.error_if_exists = false;
         options.upd_table_threshold = 1000000;
-        leveldb::Status status = leveldb::DB::Open(options, "/home/lqy/db/testdb", &db);
+        leveldb::Status status = leveldb::DB::Open(options, "/home/lqy/db/testdb_dup", &db);
         if (!status.ok()){
             std::cerr << "Open status:" << status.ToString() << std::endl;
         }
@@ -51,7 +51,8 @@ public:
         for(int i = 0; i < vec_num; i++){
             for(int j = 0; j < data[i].size(); j++){
                 std::string str = std::to_string(data[i][j]);
-                leveldb::Slice key(str);
+                std::string tmp1 = "abcdefghijklmno1234567890";
+                leveldb::Slice key(str + tmp1);
                 std::string tmp = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
                 leveldb::Slice value(str+tmp);
                 auto start = std::chrono::system_clock::now();
@@ -69,6 +70,38 @@ public:
         std::cout << "    " << total.count() / (1000 * 1000) << "ms" << std::endl;
     }
 
+    void get(int start, int end){
+        int range = end - start;
+        std::chrono::nanoseconds total = std::chrono::nanoseconds::zero();
+        std::vector<std::chrono::nanoseconds> times(range);
+        std::string tmp1 = "1234567890";
+        for(int i = 0; i < range; i++){
+            int k = start + i;
+            leveldb::Slice key(std::to_string(k) + tmp1);
+            std::string value;
+            auto start = std::chrono::system_clock::now();
+            db->Get(leveldb::ReadOptions(), key, &value);
+            std::chrono::nanoseconds duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::system_clock::now() - start);
+            times[i] = duration;
+            total += duration;
+        }
+
+        std::sort(times.begin(), times.end());
+        int p99 = range * 0.99;
+        std::chrono::nanoseconds p99_sum = std::chrono::nanoseconds::zero();
+        for(int i = p99; i < range; i++){
+            p99_sum += times[i];
+        }
+        int p01 = range * 0.01;
+        std::chrono::nanoseconds p99_avg = p99_sum / p01;
+        std::cout << "get keys " << start << "---" << end;
+        std::cout << ". total: " << total.count() / (1000 * 1000) << "ms";
+        std::cout << "; p99: " << p99_avg.count() / (1000) << "us" << std::endl;
+
+
+    }
+
 private:
     leveldb::DB* db;
     leveldb::Options options;
@@ -78,8 +111,16 @@ private:
 int main(){
     my_db db;
     int start, end;
+    std::string opt;
+    std::cin >> opt;
+    
     std::cin >> start >> end;
-    db.populate(start, end);
+    if(opt == "put") {
+        db.populate(start, end);
+    } else if(opt == "get"){
+        db.get(start, end);
+    }
+    
 
     return 0;
 }

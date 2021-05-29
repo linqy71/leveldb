@@ -111,6 +111,19 @@ Status TableCache::Get(const ReadOptions& options, uint64_t file_number,
   return s;
 }
 
+bool TableCache::KeyHitFilter(uint64_t file_number, uint64_t file_size, 
+                              const Slice& k){
+  Cache::Handle* handle = nullptr;
+  Status s = FindTable(file_number, file_size, &handle);
+  bool res = false;
+  if (s.ok()) {
+    Table* t = reinterpret_cast<TableAndFile*>(cache_->Value(handle))->table;
+    res = t->HitFilter(k);
+    cache_->Release(handle);
+  }
+  return res;
+}
+
 void TableCache::Evict(uint64_t file_number) {
   char buf[sizeof(file_number)];
   EncodeFixed64(buf, file_number);

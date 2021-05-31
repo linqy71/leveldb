@@ -19,12 +19,12 @@ class Histogram {
   void Merge(const Histogram& other);
 
   std::string ToString() const;
-
+  double Percentile(double p) const;
  private:
   enum { kNumBuckets = 154 };
 
   double Median() const;
-  double Percentile(double p) const;
+  //double Percentile(double p) const;
   double Average() const;
   double StandardDeviation() const;
 

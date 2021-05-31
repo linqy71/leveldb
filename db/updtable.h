@@ -6,6 +6,7 @@
 #include "db/dbformat.h"
 #include "db/skiplist.h"
 #include "leveldb/db.h"
+#include "leveldb/filter_policy.h"
 #include "util/arena.h"
 
 
@@ -56,7 +57,7 @@ class UpdTable {
     return record_ >= thres_;
   }
 
-
+  void BuildFilter();
 
  private:
   friend class UpdTableIterator;
@@ -79,6 +80,9 @@ class UpdTable {
 
   int record_;
   int thres_;
+
+  const FilterPolicy* policy_;
+  std::string filter_;
 };
 
 }  // namespace leveldb

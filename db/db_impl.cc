@@ -642,6 +642,7 @@ void DBImpl::TEST_CompactRange(int level, const Slice* begin,
   assert(level >= 0);
   assert(level + 1 < config::kNumLevels);
 
+  //printf("compacting level: %d\n", level);
   InternalKey begin_storage, end_storage;
 
   ManualCompaction manual;
@@ -1286,12 +1287,10 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
       if (status.ok()) {
         status = WriteBatchInternal::InsertInto(write_batch, mem_, upd_);
         if (upd_ != nullptr && upd_->isFull()){
-          //printf("upd full. divider = %d \n", divider);
-          
-          //divider = 1; // test, set to 1
-          
+          upd_->BuildFilter();
           ChooseFileAndComp(divider + 1);
           
+          //reset and recreater
           divider = 0;
           upd_->Unref();
           upd_ = new UpdTable(internal_comparator_, options_.upd_table_threshold);

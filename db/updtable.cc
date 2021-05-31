@@ -16,12 +16,16 @@ static Slice GetLengthPrefixedSlice(const char* data) {
 }
 
 UpdTable::UpdTable(const InternalKeyComparator& comparator, const int threshold)
-    : comparator_(comparator), refs_(0), table_(comparator_, &arena_) {
+    : comparator_(comparator), refs_(0), table_(comparator_, &arena_),
+    policy_(NewBloomFilterPolicy(1)) {
         record_ = 0;
         thres_ = threshold;
     }
 
-UpdTable::~UpdTable() { assert(refs_ == 0); }
+UpdTable::~UpdTable() { 
+    assert(refs_ == 0);
+    delete policy_;
+}
 
 size_t UpdTable::ApproximateMemoryUsage() { return arena_.MemoryUsage(); }
 
@@ -89,6 +93,24 @@ void UpdTable::Add(SequenceNumber s, ValueType type, const Slice& key) {
   assert(p + 8 == buf + encoded_len);
   table_.Insert(buf);
   ++record_;
+}
+
+void UpdTable::BuildFilter(){
+    Iterator* iter = NewIterator();
+    iter->SeekToFirst();
+    std::vector<Slice> keys;
+    while(iter->Valid()){
+        InternalKey ikey;
+        ikey.DecodeFrom(iter->key());
+        keys.push_back(ikey.user_key());
+        iter->Next();
+    }
+
+    filter_.clear();
+    policy_->CreateFilter(&keys[0], static_cast<int>(keys.size()),
+                            &filter_);
+
+    delete iter;
 }
 
 }  // namespace leveldb

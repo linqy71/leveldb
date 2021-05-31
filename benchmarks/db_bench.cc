@@ -329,6 +329,10 @@ class Stats {
                  name.ToString().c_str(), seconds_ * 1e6 / done_,
                  (extra.empty() ? "" : " "), extra.c_str());
     if (FLAGS_histogram) {
+      std::fprintf(stdout, "99.0% Microseconds per op: %11.3f\n", hist_.Percentile(99.0));
+      std::fprintf(stdout, "99.9% Microseconds per op: %11.3f\n", hist_.Percentile(99.9));
+      std::fprintf(stdout, "99.99% Microseconds per op: %11.3f\n", hist_.Percentile(99.99));
+      std::fprintf(stdout, "99.999% Microseconds per op: %11.3f\n", hist_.Percentile(99.999));
       std::fprintf(stdout, "Microseconds per op:\n%s\n",
                    hist_.ToString().c_str());
     }

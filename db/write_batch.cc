@@ -147,7 +147,7 @@ class UpdTableInserter : public WriteBatch::Handler {
 }  // namespace
 
 Status WriteBatchInternal::InsertInto(const WriteBatch* b, MemTable* memtable, UpdTable* updtable) {
-  if(updtable != nullptr) {
+  if(updtable != nullptr && !updtable->isFull()) {
     UpdTableInserter updinserter;
     updinserter.sequence_ = WriteBatchInternal::Sequence(b);
     updinserter.upd_ = updtable;

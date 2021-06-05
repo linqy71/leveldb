@@ -58,6 +58,7 @@ class UpdTable {
   }
 
   void BuildFilter();
+  bool Matches(const Slice& s);
 
  private:
   friend class UpdTableIterator;

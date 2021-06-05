@@ -95,14 +95,14 @@ void UpdTable::Add(SequenceNumber s, ValueType type, const Slice& key) {
   ++record_;
 }
 
-void UpdTable::BuildFilter(){
+void UpdTable::BuildFilter(){ 
     Iterator* iter = NewIterator();
     iter->SeekToFirst();
     std::vector<Slice> keys;
     while(iter->Valid()){
         InternalKey ikey;
         ikey.DecodeFrom(iter->key());
-        keys.push_back(ikey.user_key());
+        keys.push_back(ikey.user_key()); //user key
         iter->Next();
     }
 
@@ -111,6 +111,14 @@ void UpdTable::BuildFilter(){
                             &filter_);
 
     delete iter;
+}
+
+bool UpdTable::Matches(const Slice& s) {
+    if(filter_ == ""){
+        printf("error, filter_ is empty \n");
+        return false;
+    }
+    return policy_->KeyMayMatch(s, filter_);
 }
 
 }  // namespace leveldb

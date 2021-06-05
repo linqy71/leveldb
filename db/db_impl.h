@@ -27,6 +27,7 @@ class Version;
 class VersionEdit;
 class VersionSet;
 struct FileMetaData;
+enum SpState{NotScheduled = 0x00, Scheduled = 0x01, Doing = 0x02};
 
 class DBImpl : public DB {
  public:
@@ -53,6 +54,9 @@ class DBImpl : public DB {
 
   void ChooseFileAndComp(int level);
   void CompactRangeFromLevel(int level, const Slice* begin, const Slice* end);
+
+  void SpecialCompaction(int level, const Slice* begin,
+                               const Slice* end, int max_level);
 
   // Extra methods (for testing) that are not in the public DB interface
 
@@ -148,6 +152,8 @@ class DBImpl : public DB {
   void BackgroundCompaction() EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   void CleanupCompaction(CompactionState* compact)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  Status DoSpecialCompactionWork(CompactionState* compact, int max_level)
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   Status DoCompactionWork(CompactionState* compact)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
@@ -182,6 +188,7 @@ class DBImpl : public DB {
   MemTable* mem_;
   UpdTable* upd_;
   int divider;
+  SpState sp_state;
   MemTable* imm_ GUARDED_BY(mutex_);  // Memtable being compacted
   std::atomic<bool> has_imm_;         // So bg thread can detect non-null imm_
   WritableFile* logfile_;

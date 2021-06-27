@@ -23,6 +23,7 @@
 #include "db/version_edit.h"
 #include "port/port.h"
 #include "port/thread_annotations.h"
+#include "db/gloable_table.h"
 
 namespace leveldb {
 
@@ -38,6 +39,7 @@ class TableCache;
 class Version;
 class VersionSet;
 class WritableFile;
+class GlobalTable;
 
 // Return the smallest index i such that files[i]->largest >= key.
 // Return files.size() if there is no such file.
@@ -85,6 +87,8 @@ class Version {
   // bytes.  Returns true if a new compaction may need to be triggered.
   // REQUIRES: lock is held
   bool RecordReadSample(Slice key);
+
+  GlobalTable* generateGlobalTable();
 
   // Reference count management (so Versions do not disappear out from
   // under live iterators)
@@ -208,6 +212,8 @@ class VersionSet {
   // Return the combined file size of all files at the specified level.
   int64_t NumLevelBytes(int level) const;
 
+  int64_t NumLevelBytesLeft(int level) const;
+
   // Return the last sequence number.
   uint64_t LastSequence() const { return last_sequence_; }
 
@@ -232,6 +238,7 @@ class VersionSet {
   // Otherwise returns a pointer to a heap-allocated object that
   // describes the compaction.  Caller should delete the result.
   Compaction* PickCompaction();
+  Compaction* PickAllCompaction();
 
   // Return a compaction object for compacting the range [begin,end] in
   // the specified level.  Returns nullptr if there is nothing in that
@@ -247,6 +254,7 @@ class VersionSet {
   // Create an iterator that reads over the compaction inputs for "*c".
   // The caller should delete the iterator when no longer needed.
   Iterator* MakeInputIterator(Compaction* c);
+  Iterator* MakeGlobalInputIterator(Compaction* c);
 
   // Returns true iff some level needs a compaction.
   bool NeedsCompaction() const {
@@ -344,6 +352,8 @@ class Compaction {
   // Add all inputs to this compaction as delete operations to *edit.
   void AddInputDeletions(VersionEdit* edit);
 
+  void AddGlobalInputDeletions(VersionEdit* edit, GlobalTable* global_table);
+
   // Returns true if the information we have available guarantees that
   // the compaction is producing data in "level+1" for which no data exists
   // in levels greater than "level+1".
@@ -357,6 +367,7 @@ class Compaction {
   // is successful.
   void ReleaseInputs();
 
+  std::vector<FileMetaData*> inputs_global_; //no matter which level
  private:
   friend class Version;
   friend class VersionSet;
@@ -370,6 +381,8 @@ class Compaction {
 
   // Each compaction reads inputs from "level_" and "level_+1"
   std::vector<FileMetaData*> inputs_[2];  // The two sets of inputs
+
+  
 
   // State used to check for number of overlapping grandparent files
   // (parent == level_ + 1, grandparent == level_ + 2)

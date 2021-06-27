@@ -450,6 +450,16 @@ bool Version::RecordReadSample(Slice internal_key) {
   return false;
 }
 
+GlobalTable* Version::generateGlobalTable(){
+  GlobalTable* res = new GlobalTable();
+  for(int i = 0; i < config::kNumLevels; i++){
+    for(int j = 0; j < files_[i].size(); j++){
+      res->AddEntry(files_[i][j]->number, i);
+    }
+  }
+  return res;
+}
+
 void Version::Ref() { ++refs_; }
 
 void Version::Unref() {
@@ -1165,6 +1175,12 @@ int64_t VersionSet::NumLevelBytes(int level) const {
   return TotalFileSize(current_->files_[level]);
 }
 
+int64_t VersionSet::NumLevelBytesLeft(int level) const {
+  int64_t used = NumLevelBytes(level);
+  int64_t total = MaxBytesForLevel(options_, level);
+  return total - used;
+}
+
 int64_t VersionSet::MaxNextLevelOverlappingBytes() {
   int64_t result = 0;
   std::vector<FileMetaData*> overlaps;
@@ -1250,6 +1266,93 @@ Iterator* VersionSet::MakeInputIterator(Compaction* c) {
   return result;
 }
 
+Iterator* VersionSet::MakeGlobalInputIterator(Compaction* c) {
+  ReadOptions options;
+  options.verify_checksums = options_->paranoid_checks;
+  options.fill_cache = false;
+
+
+  //find no overlap files
+  //Create concatenating iterator for the files
+
+  //first, sort all files by smallest key
+  InternalKeyComparator cmp = icmp_;
+  sort(c->inputs_global_.begin(), c->inputs_global_.end(), [cmp](FileMetaData* a, FileMetaData* b){
+    return cmp.Compare(a->smallest, b->smallest) < 0;
+  });
+  std::vector<std::vector<FileMetaData*>> groups;
+  std::map<size_t, size_t> classified; // map from inputs index to group index;
+  std::map<size_t, std::pair<InternalKey, InternalKey>> range_of_group;//key is index
+  for(size_t i = 0; i < c->inputs_global_.size(); i++){
+    size_t cur_set_index = -1;
+    InternalKey cur_smallest, cur_largest;
+    auto it = classified.find(i);
+    if(it == classified.end()){
+      //file i has not been classified
+      //find the group file i is in
+      std::vector<FileMetaData*> s;
+      s.push_back(c->inputs_global_[i]);
+      groups.push_back(s);
+
+      cur_set_index = groups.size() - 1;
+      classified.insert(std::make_pair(i, groups.size() - 1));
+      cur_smallest = c->inputs_global_[i]->smallest;
+      cur_largest = c->inputs_global_[i]->largest;
+      range_of_group.insert(std::make_pair(groups.size() - 1, 
+                            std::make_pair(cur_smallest, cur_largest)));
+    } else {
+      //file i has classified, get key range
+      //find which group, than find range
+      cur_set_index = it->second;
+      auto it_rog = range_of_group.find(cur_set_index);
+      assert(it_rog != range_of_group.end());
+      auto range = it_rog->second;
+      cur_smallest = range.first;
+      cur_largest = range.second;
+      continue;
+    }
+    
+    for(size_t j = i + 1; j < c->inputs_global_.size(); j++){
+
+      auto iter_j = classified.find(j);
+      if(iter_j != classified.end()) continue;
+      
+      if(icmp_.Compare( cur_largest,  c->inputs_global_[j]->smallest) < 0){
+        // file i and j no overlap
+        assert(cur_set_index != -1);
+        groups[cur_set_index].push_back(c->inputs_global_[j]);// add to group
+
+        classified.insert(std::make_pair(j, cur_set_index)); // mark as classified
+        auto iter_rog = range_of_group.find(cur_set_index);
+        iter_rog->second.second = c->inputs_global_[j]->largest; // update group's largest
+      }
+    }
+  }
+
+  std::vector<Iterator*> vec_list;
+  int num = 0;
+  for(int i = 0; i < groups.size(); i++){
+    if(groups[i].size() == 1){
+      vec_list.push_back(table_cache_->NewIterator(options, groups[i][0]->number,
+                                                  groups[i][0]->file_size));
+    } else {
+      auto two_level_iter = NewTwoLevelIterator(
+            new Version::LevelFileNumIterator(icmp_, &groups[i]),
+            &GetFileIterator, table_cache_, options);
+      vec_list.push_back(two_level_iter);
+    }
+  }
+  const int space = vec_list.size();
+  Iterator** list = new Iterator*[space];
+  for(int i = 0; i < space; i++){
+    list[i] = vec_list[i];
+  }
+  assert(num <= space);
+  Iterator* result = NewMergingIterator(&icmp_, list, num);
+  delete[] list;
+  return result;
+}
+
 Compaction* VersionSet::PickCompaction() {
   Compaction* c;
   int level;
@@ -1300,6 +1403,49 @@ Compaction* VersionSet::PickCompaction() {
   }
 
   SetupOtherInputs(c);
+
+  return c;
+}
+
+Compaction* VersionSet::PickAllCompaction() {
+  Compaction* c;
+  int level;
+
+  // We prefer compactions triggered by too much data in a level over
+  // the compactions triggered by seeks.
+  const bool size_compaction = (current_->compaction_score_ >= 1);
+
+  if(!size_compaction) return nullptr;
+
+  //start from level 0
+  c = new Compaction(options_, 0);
+
+  //pick the first file that comes after compact_pointer_[0]
+
+  if(current_->files_[0].size() == 0) return nullptr;
+  FileMetaData* f = current_->files_[0][0]; // first file in level0
+  c->inputs_global_.push_back(f);
+
+  //for other levels, pick overlap files from each level
+  for(size_t lvl = 0; lvl < config::kNumLevels; lvl++){
+    for(size_t j = 0; j < current_->files_[lvl].size(); j++){
+      if(lvl + j == 0) continue;
+      //find overlaps and push back
+      FileMetaData* cur = current_->files_[lvl][j];
+      if(icmp_.Compare(cur->smallest, f->largest) > 0 ||
+         icmp_.Compare(cur->largest, f->smallest) < 0 ){
+          //no overlap
+      } else {
+        c->inputs_global_.push_back(cur);
+      }
+    }
+  }
+
+
+  c->input_version_ = current_;
+  c->input_version_->Ref();
+
+  //rearrange global inputs
 
   return c;
 }
@@ -1510,6 +1656,12 @@ void Compaction::AddInputDeletions(VersionEdit* edit) {
     for (size_t i = 0; i < inputs_[which].size(); i++) {
       edit->RemoveFile(level_ + which, inputs_[which][i]->number);
     }
+  }
+}
+
+void Compaction::AddGlobalInputDeletions(VersionEdit* edit, GlobalTable* global_table) {
+  for (int which = 0; which < inputs_global_.size(); which++) {
+    edit->RemoveFile(global_table->GetLevel(inputs_global_[which]->number), inputs_global_[which]->number);
   }
 }
 

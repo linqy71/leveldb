@@ -7,7 +7,9 @@
 
 #include <cstddef>
 
+#include "leveldb/cache.h"
 #include "leveldb/export.h"
+#include "leveldb/filter_policy.h"
 
 namespace leveldb {
 
@@ -58,6 +60,8 @@ struct LEVELDB_EXPORT Options {
   // become unreadable or for the entire DB to become unopenable.
   bool paranoid_checks = false;
 
+  bool CBF_ON = false;
+
   // Use the specified object to interact with the environment,
   // e.g. to read/write files, schedule background work, etc.
   // Default: Env::Default()
@@ -93,7 +97,7 @@ struct LEVELDB_EXPORT Options {
 
   // If non-null, use the specified cache for blocks.
   // If null, leveldb will automatically create and use an 8MB internal cache.
-  Cache* block_cache = nullptr;
+  Cache* block_cache = NewLRUCache(2 << 20);;
 
   // Approximate size of user data packed per block.  Note that the
   // block size specified here corresponds to uncompressed data.  The
@@ -141,7 +145,8 @@ struct LEVELDB_EXPORT Options {
   // If non-null, use the specified filter policy to reduce disk reads.
   // Many applications will benefit from passing the result of
   // NewBloomFilterPolicy() here.
-  const FilterPolicy* filter_policy = nullptr;
+  //const FilterPolicy* filter_policy = nullptr;
+  const FilterPolicy* filter_policy = NewBloomFilterPolicy(4);
 };
 
 // Options that control read operations

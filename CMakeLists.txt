@@ -178,6 +178,7 @@ target_sources(leveldb
     "util/coding.cc"
     "util/coding.h"
     "util/comparator.cc"
+    "util/counting_bloom.h"
     "util/crc32c.cc"
     "util/crc32c.h"
     "util/env.cc"
@@ -353,6 +354,8 @@ if(LEVELDB_BUILD_TESTS)
 
   if(NOT BUILD_SHARED_LIBS)
     leveldb_test("dup_test/dup_test.cc")
+    leveldb_test("db/upd_test.cc")
+    leveldb_test("db/cbf_test.cc")
     leveldb_test("db/autocompact_test.cc")
     leveldb_test("db/corruption_test.cc")
     leveldb_test("db/db_test.cc")

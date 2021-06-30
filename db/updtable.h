@@ -35,6 +35,7 @@ class UpdTable {
       delete this;
     }
   }
+  void printAll();
 
   // Returns an estimate of the number of bytes of data in use by this
   // data structure. It is safe to call when UpdTable is being modified.

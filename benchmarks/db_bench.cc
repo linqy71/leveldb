@@ -122,6 +122,7 @@ static bool FLAGS_reuse_logs = false;
 static const char* FLAGS_db = nullptr;
 
 static int FLAGS_upd_threshold = -1;
+static bool FLAGS_CBF_ON = false;
 
 namespace leveldb {
 
@@ -772,6 +773,7 @@ class Benchmark {
     options.max_file_size = FLAGS_max_file_size;
     options.block_size = FLAGS_block_size;
     options.upd_table_threshold = FLAGS_upd_threshold;
+    options.CBF_ON = FLAGS_CBF_ON;
     if (FLAGS_comparisons) {
       options.comparator = &count_comparator_;
     }
@@ -1078,6 +1080,8 @@ int main(int argc, char** argv) {
       FLAGS_db = argv[i] + 5;
     } else if (sscanf(argv[i], "--upd_thres=%d%c", &n, &junk) == 1) {
       FLAGS_upd_threshold = n;
+    } else if (sscanf(argv[i], "--cbf_on=%d%c", &n, &junk) == 1) {
+      FLAGS_CBF_ON = n;
     } else {
       std::fprintf(stderr, "Invalid flag '%s'\n", argv[i]);
       std::exit(1);

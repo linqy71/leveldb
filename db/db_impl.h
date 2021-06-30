@@ -17,6 +17,7 @@
 #include "leveldb/env.h"
 #include "port/port.h"
 #include "port/thread_annotations.h"
+#include "util/counting_bloom.h"
 
 namespace leveldb {
 
@@ -27,6 +28,7 @@ class Version;
 class VersionEdit;
 class VersionSet;
 struct FileMetaData;
+class CountingBloomFilter;
 enum SpState{NotScheduled = 0x00, Scheduled = 0x01, Doing = 0x02};
 
 class DBImpl : public DB {
@@ -53,10 +55,10 @@ class DBImpl : public DB {
   void CompactRange(const Slice* begin, const Slice* end) override;
 
   void ChooseFileAndComp(int level);
-  void CompactRangeFromLevel(int level, const Slice* begin, const Slice* end);
+  void CompactRangeAtLevel(int level, const Slice* begin, const Slice* end);
 
   void SpecialCompaction(int level, const Slice* begin,
-                               const Slice* end, int max_level);
+                               const Slice* end);
 
   // Extra methods (for testing) that are not in the public DB interface
 
@@ -148,17 +150,20 @@ class DBImpl : public DB {
 
   void MaybeScheduleCompaction() EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   static void BGWork(void* db);
+  static void BGChooseWork(void* db);
   void BackgroundCall();
+  void BackgroundChoose();
   void BackgroundCompaction() EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   void CleanupCompaction(CompactionState* compact)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
-  Status DoSpecialCompactionWork(CompactionState* compact, int max_level)
-      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
-  Status DoCompactionWork(CompactionState* compact)
+  // Status DoSpecialCompactionWork(CompactionState* compact, int max_level)
+  //     EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  Status DoCompactionWork(CompactionState* compact, bool special)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
-  Status OpenCompactionOutputFile(CompactionState* compact);
+  Status OpenCompactionOutputFile(CompactionState* compact, bool hot);
   Status FinishCompactionOutputFile(CompactionState* compact, Iterator* input);
+  Status FinishCompactionOutputFileHot(CompactionState* compact, Iterator* input);
   Status InstallCompactionResults(CompactionState* compact)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
@@ -187,6 +192,8 @@ class DBImpl : public DB {
   port::CondVar background_work_finished_signal_ GUARDED_BY(mutex_);
   MemTable* mem_;
   UpdTable* upd_;
+  UpdTable* full_upd_;
+  CountingBloomFilter* cbf;
   int divider;
   SpState sp_state;
   MemTable* imm_ GUARDED_BY(mutex_);  // Memtable being compacted

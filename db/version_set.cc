@@ -504,12 +504,17 @@ bool Version::OverlapInFile(FileMetaData* file, const Slice* smallest_user_key,
 
   const Comparator* ucmp = vset_->icmp_.user_comparator();
 
-  if (AfterFile(ucmp, smallest_user_key, file) ||
-        BeforeFile(ucmp, largest_user_key, file)) {
-    return false;
+  if(smallest_user_key != nullptr && largest_user_key != nullptr &&
+    ucmp->Compare(*smallest_user_key, file->smallest.user_key()) <= 0 && 
+    ucmp->Compare(*largest_user_key, file->largest.user_key()) >= 0) {
+      return true;
   }
+  // if (AfterFile(ucmp, smallest_user_key, file) ||
+  //       BeforeFile(ucmp, largest_user_key, file)) {
+  //   return false;
+  // }
 
-  return true;
+  return false;
 
 }
 
@@ -533,6 +538,15 @@ std::vector<FileMetaData*>  Version::OverlapFilesInLevel(int level,
 
 bool Version::UpdKeyHitInFile(FileMetaData* f, const Slice& k){
   return vset_->table_cache_->KeyHitFilter(f->number, f->file_size, k);
+}
+
+void Version::printFileMeta(int level){
+  for(int i = 0; i < NumFiles(level); i++){
+    FileMetaData* tmp = files_[level][i];
+    printf("file number: %d, smallest:%s, larget: %s\n", 
+      tmp->number, tmp->smallest.user_key().data(),
+      tmp->largest.user_key().data());
+  }
 }
 
 // Store in "*inputs" all files in "level" that overlap [begin,end]
@@ -1299,6 +1313,7 @@ Compaction* VersionSet::PickCompaction() {
   // the compactions triggered by seeks.
   const bool size_compaction = (current_->compaction_score_ >= 1);
   const bool seek_compaction = (current_->file_to_compact_ != nullptr);
+  //const bool seek_compaction = false;
   if (size_compaction) {
     level = current_->compaction_level_;
     assert(level >= 0);

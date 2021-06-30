@@ -17,7 +17,7 @@ static Slice GetLengthPrefixedSlice(const char* data) {
 
 UpdTable::UpdTable(const InternalKeyComparator& comparator, const int threshold)
     : comparator_(comparator), refs_(0), table_(comparator_, &arena_),
-    policy_(NewBloomFilterPolicy(1)) {
+    policy_(NewBloomFilterPolicy(3)) {
         record_ = 0;
         thres_ = threshold;
     }
@@ -25,6 +25,17 @@ UpdTable::UpdTable(const InternalKeyComparator& comparator, const int threshold)
 UpdTable::~UpdTable() { 
     assert(refs_ == 0);
     delete policy_;
+}
+
+void UpdTable::printAll() {
+  Iterator* iter = NewIterator();
+  iter->SeekToFirst();
+  int cnt = 1;
+  while (iter->Valid()) {
+    printf("%d: %s\n", cnt++, iter->key());
+    iter->Next();
+  }
+  delete iter;
 }
 
 size_t UpdTable::ApproximateMemoryUsage() { return arena_.MemoryUsage(); }
@@ -100,10 +111,11 @@ void UpdTable::BuildFilter(){
     iter->SeekToFirst();
     std::vector<Slice> keys;
     while(iter->Valid()){
-        InternalKey ikey;
-        ikey.DecodeFrom(iter->key());
-        keys.push_back(ikey.user_key()); //user key
-        iter->Next();
+      if(iter->key().size() != 0){
+        Slice ukey = ExtractUserKey(iter->key());
+        keys.push_back(ukey); //user key
+      }
+      iter->Next();
     }
 
     filter_.clear();
@@ -115,7 +127,7 @@ void UpdTable::BuildFilter(){
 
 bool UpdTable::Matches(const Slice& s) {
     if(filter_ == ""){
-        printf("error, filter_ is empty \n");
+        //printf("error, filter_ is empty \n");
         return false;
     }
     return policy_->KeyMayMatch(s, filter_);

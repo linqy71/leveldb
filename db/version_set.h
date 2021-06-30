@@ -121,6 +121,8 @@ class Version {
 
   int NumFiles(int level) const { return files_[level].size(); }
 
+  void printFileMeta(int level);
+
   // Return a human readable string that describes this version's contents.
   std::string DebugString() const;
 

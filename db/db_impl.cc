@@ -792,6 +792,7 @@ void DBImpl::BackgroundGlobalCompaction() {
   Compaction* c;
   bool is_manual = (manual_compaction_ != nullptr);
   InternalKey manual_end;
+  bool global = false;
   if (is_manual) {
     ManualCompaction* m = manual_compaction_;
     c = versions_->CompactRange(m->level, m->begin, m->end);
@@ -805,15 +806,29 @@ void DBImpl::BackgroundGlobalCompaction() {
         (m->end ? m->end->DebugString().c_str() : "(end)"),
         (m->done ? "(end)" : manual_end.DebugString().c_str()));
   } else {
-    c = versions_->PickAllCompaction();
+    c = versions_->PickAllCompaction(); // try global compaction
+    if(c == nullptr){
+      c = versions_->PickCompaction(); // try normal compaction
+    } else {
+      global = true;
+    }
   }
 
   Status status;
   if (c == nullptr) {
     // Nothing to do
-  } else if(!is_doing_global) {
+  } else if(!is_doing_global && global) {
     CompactionState* compact = new CompactionState(c);
     status = DoGlobalCompactionWork(compact);
+    if (!status.ok()) {
+      RecordBackgroundError(status);
+    }
+    CleanupCompaction(compact);
+    c->ReleaseInputs();
+    RemoveObsoleteFiles();
+  } else if(!is_doing_global && !global){
+    CompactionState* compact = new CompactionState(c);
+    status = DoCompactionWork(compact);
     if (!status.ok()) {
       RecordBackgroundError(status);
     }
@@ -954,22 +969,21 @@ Status DBImpl::InstallGlobalCompactionResults(CompactionState* compact) {
   //output file save to which level
   //find a level large enough
   int target_level = 1;
+  if(compact->compaction->deepest_level != 0) {
+   target_level = compact->compaction->deepest_level;
+  }
   uint64_t output_size = 0; // calculate output size
-  for(size_t i = 0; i < compact->outputs.size(); i++){
-    output_size += compact->outputs[i].file_size;
-  }
-
-  for(int i = 1; i < config::kNumLevels; i++){
-    uint64_t free_bytes = versions_->NumLevelBytesLeft(i);
-    if(free_bytes > output_size){
-      target_level = i;
-      break;
-    }
-  }
+  uint64_t free_bytes = versions_->NumLevelBytesLeft(target_level);
   for (size_t i = 0; i < compact->outputs.size(); i++) {
     const CompactionState::Output& out = compact->outputs[i];
+    output_size += out.file_size;
+    if(output_size > free_bytes) {
+      target_level++;
+      free_bytes = versions_->NumLevelBytesLeft(target_level);
+      output_size = out.file_size;
+    }
     compact->compaction->edit()->AddFile(target_level, out.number, out.file_size,
-                                         out.smallest, out.largest);
+                                        out.smallest, out.largest);
   }
   return versions_->LogAndApply(compact->compaction->edit(), &mutex_);
 }

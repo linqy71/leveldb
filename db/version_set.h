@@ -368,6 +368,7 @@ class Compaction {
   void ReleaseInputs();
 
   std::vector<FileMetaData*> inputs_global_; //no matter which level
+  int deepest_level;
  private:
   friend class Version;
   friend class VersionSet;

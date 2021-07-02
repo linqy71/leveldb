@@ -1417,37 +1417,68 @@ Compaction* VersionSet::PickAllCompaction() {
 
   if(!size_compaction) return nullptr;
 
-  //start from level 0
-  c = new Compaction(options_, 0);
+  //if only level0 and level1, do nomal compaction
+  if(NumLevelFiles(2) == 0){
+    return nullptr;
+  }
 
-  //pick the first file that comes after compact_pointer_[0]
-
-  if(current_->files_[0].size() == 0) return nullptr;
-  FileMetaData* f = current_->files_[0][0]; // first file in level0
-  c->inputs_global_.push_back(f);
-
-  //for other levels, pick overlap files from each level
-  for(size_t lvl = 0; lvl < config::kNumLevels; lvl++){
-    for(size_t j = 0; j < current_->files_[lvl].size(); j++){
-      if(lvl + j == 0) continue;
-      //find overlaps and push back
-      FileMetaData* cur = current_->files_[lvl][j];
-      if(icmp_.Compare(cur->smallest, f->largest) > 0 ||
-         icmp_.Compare(cur->largest, f->smallest) < 0 ){
-          //no overlap
-      } else {
-        c->inputs_global_.push_back(cur);
-      }
+  int deepest_level = config::kNumLevels - 1;
+  for(int i = deepest_level; i >= 2; i--){
+    if(NumLevelFiles(i) != 0 && NumLevelBytesLeft(i) >= MaxBytesForLevel(options_, i) / 2){
+      deepest_level = i;
+      break;
+    } else if(NumLevelFiles(i) != 0){// left bytes less than 1/2
+      deepest_level = i + 1 >= config::kNumLevels ? i : i + 1;
+      break;
     }
   }
 
+  if(NumLevelFiles(deepest_level) == 0) { //write to new empty level
+    return nullptr;
+  }
 
-  c->input_version_ = current_;
-  c->input_version_->Ref();
+  //find overlap with deepest level last file
+  c = new Compaction(options_, deepest_level - 1);
+  int num_files = NumLevelFiles(deepest_level);
+  FileMetaData* f = current_->files_[deepest_level][num_files - 1];
 
-  //rearrange global inputs
+  c->inputs_global_.push_back(f);
+  bool find_proper_files = false;
+  int pivot_file_index = num_files - 1;
+  InternalKey smallest = f->smallest;
+  InternalKey largest = f->largest;
+  while(!find_proper_files){
+    //start from level 0, pick overlap files from each level
+    for(size_t lvl = 0; lvl < deepest_level; lvl++){
+      for(size_t j = 0; j < current_->files_[lvl].size(); j++){
+        if(lvl + j == 0) continue;
+        //find overlaps and push back
+        FileMetaData* cur = current_->files_[lvl][j];
+        if(icmp_.Compare(cur->smallest, largest) > 0 ||
+          icmp_.Compare(cur->largest, smallest) < 0 ){
+            //no overlap
+        } else if(icmp_.Compare(cur->smallest, largest) < 0 &&
+          icmp_.Compare(cur->smallest, smallest) >= 0) {
+          //input file's smallest cannot larger than f->smallest
+          //otherwise output may overlap with other files
+          c->inputs_global_.push_back(cur);
+          find_proper_files = true;
+        }
+      }
+    }
+    pivot_file_index--;
+    if(pivot_file_index < 0) break;
+    smallest = current_->files_[deepest_level][pivot_file_index]->smallest;
+  }
 
-  return c;
+  if(find_proper_files){
+    c->input_version_ = current_;
+    c->input_version_->Ref();
+    c->deepest_level = deepest_level;
+    return c;
+  } else {
+    return nullptr;
+  }
 }
 
 // Finds the largest key in a vector of files. Returns true if files it not
@@ -1629,7 +1660,8 @@ Compaction::Compaction(const Options* options, int level)
       input_version_(nullptr),
       grandparent_index_(0),
       seen_key_(false),
-      overlapped_bytes_(0) {
+      overlapped_bytes_(0),
+      deepest_level(0) {
   for (int i = 0; i < config::kNumLevels; i++) {
     level_ptrs_[i] = 0;
   }

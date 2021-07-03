@@ -144,6 +144,7 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       logfile_number_(0),
       log_(nullptr),
       seed_(0),
+      count(0),
       tmp_batch_(new WriteBatch),
       background_compaction_scheduled_(false),
       manual_compaction_(nullptr),
@@ -1008,6 +1009,10 @@ Status DBImpl::InstallCompactionResults(CompactionState* compact) {
 
 Status DBImpl::DoGlobalCompactionWork(CompactionState* compact) {
   is_doing_global = true;
+  count++;
+  if(count % 10 == 0) {
+    printf("do global compaction %ld times\n", count);
+  }
   const uint64_t start_micros = env_->NowMicros();
   int64_t imm_micros = 0;  // Micros spent doing imm_ compactions
 

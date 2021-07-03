@@ -176,6 +176,7 @@ class DBImpl : public DB {
   FileLock* db_lock_;
 
   bool is_doing_global;
+  long count;
 
   // State below is protected by mutex_
   port::Mutex mutex_;

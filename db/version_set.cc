@@ -1438,7 +1438,7 @@ Compaction* VersionSet::PickAllCompaction() {
   }
 
   //find overlap with deepest level last file
-  c = new Compaction(options_, deepest_level - 1);
+  c = new Compaction(options_, deepest_level);
   int num_files = NumLevelFiles(deepest_level);
   FileMetaData* f = current_->files_[deepest_level][num_files - 1];
 

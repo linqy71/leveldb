@@ -28,14 +28,14 @@ public:
 		data_file.open(path, std::ios::binary);
 
 		std::string line;
-		std::string value = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890\
-												abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
+		// std::string value = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890\
+		// 										abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
 		std::chrono::nanoseconds total = std::chrono::nanoseconds::zero();
         long cnt = 0;
 		while(getline(data_file, line)){
 			auto start = std::chrono::system_clock::now();
             std::string key = line.substr(10,64);
-			leveldb::Status s = db->Put(leveldb::WriteOptions(), key, value);
+			leveldb::Status s = db->Put(leveldb::WriteOptions(), key, line);
 			std::chrono::nanoseconds duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
 									std::chrono::system_clock::now() - start);
 			total += duration;

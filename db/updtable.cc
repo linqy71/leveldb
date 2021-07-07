@@ -104,6 +104,17 @@ void UpdTable::Add(SequenceNumber s, ValueType type, const Slice& key) {
   assert(p + 8 == buf + encoded_len);
   table_.Insert(buf);
   ++record_;
+  if(smallest.size() == 0) {
+    smallest = key;
+  }
+  if(largest.size() == 0){
+    largest = key;
+  }
+  if(comparator_.comparator.Compare(key, smallest) < 0){
+    smallest = key;
+  } else if(comparator_.comparator.Compare(key, largest) > 0){
+    largest = key;
+  }
 }
 
 void UpdTable::BuildFilter(){ 

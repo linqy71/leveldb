@@ -158,7 +158,7 @@ class DBImpl : public DB {
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   // Status DoSpecialCompactionWork(CompactionState* compact, int max_level)
   //     EXCLUSIVE_LOCKS_REQUIRED(mutex_);
-  Status DoCompactionWork(CompactionState* compact, bool special)
+  Status DoCompactionWork(CompactionState* compact, bool special, bool passive)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   Status OpenCompactionOutputFile(CompactionState* compact, bool hot);

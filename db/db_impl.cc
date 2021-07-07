@@ -669,7 +669,7 @@ void DBImpl::SpecialCompaction(int level, const Slice* begin,
     // Nothing to do, reset
   } else {
     CompactionState* compact = new CompactionState(c);
-    status = DoCompactionWork(compact, true);
+    status = DoCompactionWork(compact, true, false);//passive = false
     if (!status.ok()) {
       RecordBackgroundError(status);
     }
@@ -791,8 +791,8 @@ void DBImpl::BackgroundChoose() {
   } else if (!bg_error_.ok()) {
     // No more background work after a background error.
   } else {
-    //ChooseFileAndComp(divider+1);
-    ChooseFileAndComp(1);
+    ChooseFileAndComp(divider+1);
+    //ChooseFileAndComp(1);
   }
 
   background_compaction_scheduled_ = false;
@@ -830,6 +830,7 @@ void DBImpl::BackgroundCompaction() {
     return;
   }
 
+  bool special = false;
   Compaction* c;
   bool is_manual = (manual_compaction_ != nullptr);
   InternalKey manual_end;
@@ -847,6 +848,31 @@ void DBImpl::BackgroundCompaction() {
         (m->done ? "(end)" : manual_end.DebugString().c_str()));
   } else {
     c = versions_->PickCompaction();
+    if(c != nullptr && upd_ != nullptr){
+      if(c->level() > divider){
+        //no matter upd_ is full or not
+
+        //should do special compaction
+        //check if overlap with upd
+        Slice upd_smallest = upd_->smallest;
+        Slice upd_largest = upd_->largest;
+        
+        int upper_level_file_num = c->num_input_files(0);
+        if(upper_level_file_num != 0 && upd_smallest.size() != 0 && upd_largest.size() != 0){
+          Slice input_smallest = c->input(0, 0)->smallest.user_key();
+          Slice input_largest = c->input(0, upper_level_file_num - 1)->largest.user_key();
+          if(internal_comparator_.Compare(input_smallest, upd_largest) > 0 ||
+            internal_comparator_.Compare(input_largest, upd_smallest) < 0) {
+              //no overlap
+          } else {
+            // check upd ratio
+            //暂时先不考虑重复率的多少，有交叉就执行带去重的compaction
+            special = true;
+            //printf("passive dedup\n");
+          }
+        }
+      }
+    }
   }
 
   Status status;
@@ -879,7 +905,8 @@ void DBImpl::BackgroundCompaction() {
       //printf("compacting level %d --> %d\n", divider, divider+1);
       divider += 1;
     }
-    status = DoCompactionWork(compact, false);
+    bool passive = true;
+    status = DoCompactionWork(compact, special, passive);
     if (!status.ok()) {
       RecordBackgroundError(status);
     }
@@ -1096,7 +1123,7 @@ Status DBImpl::InstallCompactionResults(CompactionState* compact) {
   return versions_->LogAndApply(compact->compaction->edit(), &mutex_);
 }
 
-Status DBImpl::DoCompactionWork(CompactionState* compact, bool special) {
+Status DBImpl::DoCompactionWork(CompactionState* compact, bool special, bool passive) {
   const uint64_t start_micros = env_->NowMicros();
   int64_t imm_micros = 0;  // Micros spent doing imm_ compactions
 
@@ -1115,9 +1142,11 @@ Status DBImpl::DoCompactionWork(CompactionState* compact, bool special) {
   }
 
   Iterator* input = versions_->MakeInputIterator(compact->compaction);
-  if(special){
-    printf("doing special compaction at level: %d ---------\n", compact->compaction->level());
-  }
+  // if(special && passive){
+  //   printf("passive -- doing special compaction at level: %d ---------\n", compact->compaction->level());
+  // } else if(special){
+  //   printf("active -- doing special compaction at level: %d ---------\n", compact->compaction->level());
+  // }
 
   // Release mutex while we're actually doing the compaction work
   mutex_.Unlock();
@@ -1130,6 +1159,16 @@ Status DBImpl::DoCompactionWork(CompactionState* compact, bool special) {
   SequenceNumber last_sequence_for_key = kMaxSequenceNumber;
   Slice input_level_smallest = compact->compaction->input(0,0)->smallest.Encode();
   Slice input_level_largest = compact->compaction->input(0,0)->largest.Encode();
+
+  Iterator* upditer = nullptr;
+  if(passive){//upd_ not full
+    upditer = upd_->NewIterator();
+  } else {
+    assert(full_upd_ != nullptr);
+    assert(full_upd_->isFull());
+    upditer = full_upd_->NewIterator();
+  }
+
   while (input->Valid() && !shutting_down_.load(std::memory_order_acquire)) {
     // Prioritize immutable compaction work
     if (has_imm_.load(std::memory_order_relaxed)) {
@@ -1166,19 +1205,11 @@ Status DBImpl::DoCompactionWork(CompactionState* compact, bool special) {
               0) {
         // First occurrence of this user key
         bool key_in_upd = false;
-        special = false;
         if(special){
-          if (full_upd_){
-            assert(full_upd_->isFull());
-            if (full_upd_->Matches(ikey.user_key)){ // match bloom filter
-              Iterator* upditer = upd_->NewIterator();
-              upditer->Seek(ikey.user_key);
-              if(upditer->Valid()){ //key in upd
-                key_in_upd = true;
-              }
-              delete upditer;
-            }
-          } 
+          upditer->Seek(ikey.user_key);
+          if(upditer->Valid()){ //key in upd
+            key_in_upd = true;
+          }
         }
         if (!key_in_upd) {
           current_user_key.assign(ikey.user_key.data(), ikey.user_key.size());
@@ -1282,6 +1313,8 @@ Status DBImpl::DoCompactionWork(CompactionState* compact, bool special) {
     input->Next();
   }
 
+  delete upditer;
+
   if (status.ok() && shutting_down_.load(std::memory_order_acquire)) {
     status = Status::IOError("Deleting DB during compaction");
   }
@@ -1294,9 +1327,9 @@ Status DBImpl::DoCompactionWork(CompactionState* compact, bool special) {
   if (status.ok()) {
     status = input->status();
   }
-  if (special){
-    printf("special compaction done ---------\n");
-  }
+  // if (special){
+  //   printf("special compaction done ---------\n");
+  // }
   delete input;
   input = nullptr;
 

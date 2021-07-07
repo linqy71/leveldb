@@ -61,6 +61,9 @@ class UpdTable {
   void BuildFilter();
   bool Matches(const Slice& s);
 
+  Slice smallest;//user key
+  Slice largest;
+
  private:
   friend class UpdTableIterator;
   //friend class MemTableBackwardIterator;
@@ -85,6 +88,7 @@ class UpdTable {
 
   const FilterPolicy* policy_;
   std::string filter_;
+  
 };
 
 }  // namespace leveldb

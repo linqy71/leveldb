@@ -14,7 +14,7 @@ public:
     my_db(){
         options.create_if_missing = true;
 	    options.error_if_exists = false;
-        //options.upd_table_threshold = 100000;
+        options.upd_table_threshold = 1000000;
         leveldb::Status status = leveldb::DB::Open(options, "/home/lqy/db/testdb_dup", &db);
         if (!status.ok()){
             std::cerr << "Open status:" << status.ToString() << std::endl;

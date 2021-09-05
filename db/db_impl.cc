@@ -1184,6 +1184,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact, bool special, bool pas
     }
 
     Slice key = input->key();
+    assert(key.size() >= 8);
     if (compact->compaction->ShouldStopBefore(key) &&
         compact->builder != nullptr) {
       status = FinishCompactionOutputFile(compact, input);

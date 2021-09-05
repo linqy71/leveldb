@@ -110,9 +110,9 @@ void UpdTable::Add(SequenceNumber s, ValueType type, const Slice& key) {
   if(largest.size() == 0){
     largest = key;
   }
-  if(comparator_.comparator.Compare(key, smallest) < 0){
+  if(comparator_.comparator.UserKeyCompare(key, smallest) < 0){
     smallest = key;
-  } else if(comparator_.comparator.Compare(key, largest) > 0){
+  } else if(comparator_.comparator.UserKeyCompare(key, largest) > 0){
     largest = key;
   }
 }

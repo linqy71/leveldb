@@ -49,6 +49,7 @@ static const char* FLAGS_benchmarks =
     "fillseq,"
     "fillsync,"
     "fillrandom,"
+    "fillfromfile,"
     "dupfillseq,"
     "dupfillrandom,"
     "overwrite,"
@@ -56,6 +57,7 @@ static const char* FLAGS_benchmarks =
     "readrandomfixed,"
     "readrandom,"  // Extra run to allow previous compactions to quiesce
     "readseq,"
+    "readfromfile,"
     "readreverse,"
     "compact,"
     "readrandom,"
@@ -114,6 +116,8 @@ static int FLAGS_bloom_bits = -1;
 // Common key prefix length.
 static int FLAGS_key_prefix = 0;
 
+static int FLAGS_key_size = 64;
+
 // If true, do not destroy the existing database.  If you set this
 // flag and also specify a benchmark that wants a fresh database, that
 // benchmark will fail.
@@ -128,6 +132,7 @@ static const char* FLAGS_db = nullptr;
 static int FLAGS_dup_ratio = 1;
 static int FLAGS_upd_threshold = -1;
 static bool FLAGS_CBF_ON = false;
+static const char* FLAGS_key_file_path = nullptr;
 
 namespace leveldb {
 
@@ -393,7 +398,7 @@ class Benchmark {
   int total_thread_count_;
 
   void PrintHeader() {
-    const int kKeySize = 16 + FLAGS_key_prefix;
+    const int kKeySize = FLAGS_key_size + FLAGS_key_prefix;
     PrintEnvironment();
     std::fprintf(stdout, "Keys:       %d bytes each\n", kKeySize);
     std::fprintf(
@@ -543,6 +548,9 @@ class Benchmark {
       } else if (name == Slice("fillrandom")) {
         fresh_db = true;
         method = &Benchmark::WriteRandom;
+      } else if (name == Slice("fillfromfile")) {
+        fresh_db = true;
+        method = &Benchmark::WriteFromFile;
       } else if (name == Slice("overwrite")) {
         fresh_db = false;
         method = &Benchmark::WriteRandom;
@@ -564,6 +572,8 @@ class Benchmark {
         method = &Benchmark::ReadRandom;
       } else if (name == Slice("readmissing")) {
         method = &Benchmark::ReadMissing;
+      } else if (name == Slice("readfromfile")) {
+        method = &Benchmark::ReadFromFile;
       } else if (name == Slice("seekrandom")) {
         method = &Benchmark::SeekRandom;
       } else if (name == Slice("seekordered")) {
@@ -814,6 +824,9 @@ class Benchmark {
   void WriteRandom(ThreadState* thread) { DoWrite(thread, false); }
 
   void DupWriteRandom(ThreadState* thread) { DoDupWrite(thread, false, FLAGS_dup_ratio); }
+  void WriteFromFile(ThreadState* thread) { DoWriteFromFile(thread, FLAGS_dup_ratio, FLAGS_key_file_path); }
+  void ReadFromFile(ThreadState* thread) { DoReadFromFile(thread, FLAGS_key_file_path); }
+
 
   void DoWrite(ThreadState* thread, bool seq) {
     if (num_ != FLAGS_num) {
@@ -877,7 +890,34 @@ class Benchmark {
     thread->stats.AddBytes(bytes);
   }
 
-  void DoWriteFromFile(ThreadState* thread, bool seq, int dup_ratio, std::string& file_path) {
+  void DoReadFromFile(ThreadState* thread, const char* file_path) {
+    ReadOptions options;
+    std::string value;
+    int found = 0;
+    KeyBuffer key;
+    // open file
+    std::ifstream fin(file_path, std::ios::binary);
+    if(!fin) {
+      fprintf(stderr, "file %s not exist! \n", file_path);
+      return ;
+    }
+    std::string line;
+    int rows = 0;
+    // read all keys of db
+    while(getline(fin, line)){
+      Slice key(line.substr(10,64));
+      if (db_->Get(options, key, &value).ok()) {
+        found++;
+      }
+      thread->stats.FinishedSingleOp();
+      rows++;
+    }
+    char msg[100];
+    std::snprintf(msg, sizeof(msg), "(%d of %d found)", found, rows);
+    thread->stats.AddMessage(msg);
+  }
+
+  void DoWriteFromFile(ThreadState* thread, int dup_ratio, const char* file_path) {
     if (num_ != FLAGS_num) {
       char msg[100];
       std::snprintf(msg, sizeof(msg), "(%d ops)", num_);
@@ -889,32 +929,54 @@ class Benchmark {
     Status s;
     int64_t bytes = 0;
 
-    for(int t = 0; t < dup_ratio; t++){
-      std::ifstream fin(file_path, std::ios::binary);
-      if(!fin) {
-        fprintf(stderr, "file %s not exist! \n", file_path.c_str());
-        return ;
+    // open file
+    std::ifstream fin(file_path, std::ios::binary);
+    if(!fin) {
+      fprintf(stderr, "file %s not exist! \n", file_path);
+      return ;
+    }
+    int rows = 0;
+    std::string line;
+    // write all rows into db
+    // calculate row number
+    while(getline(fin, line)){
+      rows++;
+      batch.Clear();
+      Slice key(line.substr(10,64));
+      batch.Put(key, gen.Generate(value_size_));
+      bytes += value_size_ + key.size();
+      s = db_->Write(write_options_, &batch);
+      if (!s.ok()) {
+        std::fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+        std::exit(1);
       }
-      std::string line;
-      
-      for (int i = 0; i < num_; i += entries_per_batch_) {
+      thread->stats.FinishedSingleOp();
+    }
+    thread->stats.AddBytes(bytes);
+    bytes = 0;
+    fin.clear();
+
+    fin.seekg(0, std::ios::beg);
+    // repeat for dup_ratio times
+    for(int t = 0; t < dup_ratio; t++){
+      int dup_row = rows * 0.9;
+      // only repeat 90% key
+      for(int i = 0; i < dup_row; i++){
+        getline(fin, line);
         batch.Clear();
-        for (int j = 0; j < entries_per_batch_; j++) {
-          getline(fin, line);
-          Slice key(line.substr(10,74));
-          batch.Put(key, gen.Generate(value_size_));
-          bytes += value_size_ + key.size();
-          thread->stats.FinishedSingleOp();
-        }
+        Slice key(line.substr(10,64));
+        batch.Put(key, gen.Generate(value_size_));
+        bytes += value_size_ + key.size();
         s = db_->Write(write_options_, &batch);
         if (!s.ok()) {
           std::fprintf(stderr, "put error: %s\n", s.ToString().c_str());
           std::exit(1);
         }
+        thread->stats.FinishedSingleOp();
       }
-      fin.close();
     }
     thread->stats.AddBytes(bytes);
+    std::fprintf(stdout, "file row number:    %d, repeat for %d times\n", rows, FLAGS_dup_ratio);
   }
 
   void ReadSequential(ThreadState* thread) {
@@ -1191,6 +1253,8 @@ int main(int argc, char** argv) {
       FLAGS_CBF_ON = n;
     } else if (sscanf(argv[i], "--dup_ratio=%d%c", &n, &junk) == 1) {
       FLAGS_dup_ratio = n;
+    } else if (strncmp(argv[i], "--key_file_path=", 16) == 0) {
+      FLAGS_key_file_path = argv[i] + 16;
     } else {
       std::fprintf(stderr, "Invalid flag '%s'\n", argv[i]);
       std::exit(1);

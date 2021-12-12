@@ -548,9 +548,12 @@ class Benchmark {
       } else if (name == Slice("fillrandom")) {
         fresh_db = true;
         method = &Benchmark::WriteRandom;
-      } else if (name == Slice("fillfromfile")) {
+      } else if (name == Slice("fillfromfileall")) {
         fresh_db = true;
         method = &Benchmark::WriteFromFile;
+      } else if (name == Slice("fillfromfilerepeat")) {
+        fresh_db = false;
+        method = &Benchmark::WriteFromFileRepeat;
       } else if (name == Slice("overwrite")) {
         fresh_db = false;
         method = &Benchmark::WriteRandom;
@@ -824,7 +827,8 @@ class Benchmark {
   void WriteRandom(ThreadState* thread) { DoWrite(thread, false); }
 
   void DupWriteRandom(ThreadState* thread) { DoDupWrite(thread, false, FLAGS_dup_ratio); }
-  void WriteFromFile(ThreadState* thread) { DoWriteFromFile(thread, FLAGS_dup_ratio, FLAGS_key_file_path); }
+  void WriteFromFile(ThreadState* thread) { DoWriteFromFileALL(thread, FLAGS_key_file_path); }
+  void WriteFromFileRepeat(ThreadState* thread) {DoWriteFromFileDup1(thread, FLAGS_key_file_path); }
   void ReadFromFile(ThreadState* thread) { DoReadFromFile(thread, FLAGS_key_file_path); }
 
 
@@ -897,6 +901,7 @@ class Benchmark {
     KeyBuffer key;
     // open file
     std::ifstream fin(file_path, std::ios::binary);
+    fin.clear();
     if(!fin) {
       fprintf(stderr, "file %s not exist! \n", file_path);
       return ;
@@ -905,19 +910,20 @@ class Benchmark {
     int rows = 0;
     // read all keys of db
     while(getline(fin, line)){
-      Slice key(line.substr(10,64));
+      Slice key(line);
       if (db_->Get(options, key, &value).ok()) {
         found++;
       }
       thread->stats.FinishedSingleOp();
       rows++;
     }
+    num_ = rows;
     char msg[100];
     std::snprintf(msg, sizeof(msg), "(%d of %d found)", found, rows);
     thread->stats.AddMessage(msg);
   }
 
-  void DoWriteFromFile(ThreadState* thread, int dup_ratio, const char* file_path) {
+  void DoWriteFromFileALL(ThreadState* thread, const char* file_path) {
     if (num_ != FLAGS_num) {
       char msg[100];
       std::snprintf(msg, sizeof(msg), "(%d ops)", num_);
@@ -931,6 +937,7 @@ class Benchmark {
 
     // open file
     std::ifstream fin(file_path, std::ios::binary);
+    fin.clear();
     if(!fin) {
       fprintf(stderr, "file %s not exist! \n", file_path);
       return ;
@@ -942,7 +949,7 @@ class Benchmark {
     while(getline(fin, line)){
       rows++;
       batch.Clear();
-      Slice key(line.substr(10,64));
+      Slice key(line);
       batch.Put(key, gen.Generate(value_size_));
       bytes += value_size_ + key.size();
       s = db_->Write(write_options_, &batch);
@@ -953,30 +960,51 @@ class Benchmark {
       thread->stats.FinishedSingleOp();
     }
     thread->stats.AddBytes(bytes);
-    bytes = 0;
-    fin.clear();
+    fin.close();
+    std::fprintf(stdout, "file row number:    %d, no repeat\n", rows);
+  }
 
-    fin.seekg(0, std::ios::beg);
-    // repeat for dup_ratio times
-    for(int t = 0; t < dup_ratio; t++){
-      int dup_row = rows * 0.9;
-      // only repeat 90% key
-      for(int i = 0; i < dup_row; i++){
-        getline(fin, line);
-        batch.Clear();
-        Slice key(line.substr(10,64));
-        batch.Put(key, gen.Generate(value_size_));
-        bytes += value_size_ + key.size();
-        s = db_->Write(write_options_, &batch);
-        if (!s.ok()) {
-          std::fprintf(stderr, "put error: %s\n", s.ToString().c_str());
-          std::exit(1);
-        }
-        thread->stats.FinishedSingleOp();
+  //repeat 90% file key for 1 time
+  void DoWriteFromFileDup1(ThreadState* thread, const char* file_path) {
+    if (num_ != FLAGS_num) {
+      char msg[100];
+      std::snprintf(msg, sizeof(msg), "(%d ops)", num_);
+      thread->stats.AddMessage(msg);
+    }
+
+    RandomGenerator gen;
+    WriteBatch batch;
+    Status s;
+    int64_t bytes = 0;
+
+    // open file
+    std::ifstream fin(file_path, std::ios::binary);
+    fin.clear();
+    if(!fin) {
+      fprintf(stderr, "file %s not exist! \n", file_path);
+      return ;
+    }
+    int rows = 0;
+    int max_row = 900000000;
+    std::string line;
+    // write 90% rows into db
+    while(getline(fin, line)){
+      rows++;
+      if(rows == max_row) break;
+      batch.Clear();
+      Slice key(line);
+      batch.Put(key, gen.Generate(value_size_));
+      bytes += value_size_ + key.size();
+      s = db_->Write(write_options_, &batch);
+      if (!s.ok()) {
+        std::fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+        std::exit(1);
       }
+      thread->stats.FinishedSingleOp();
     }
     thread->stats.AddBytes(bytes);
-    std::fprintf(stdout, "file row number:    %d, repeat for %d times\n", rows, FLAGS_dup_ratio);
+    fin.close();
+    std::fprintf(stdout, "file row number:    %d, repeat for 1 times\n", rows);
   }
 
   void ReadSequential(ThreadState* thread) {

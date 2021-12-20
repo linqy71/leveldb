@@ -219,6 +219,29 @@ inline LookupKey::~LookupKey() {
   if (start_ != space_) delete[] start_;
 }
 
+// A helper class useful for ActiveCompaction
+class ActiveKey {
+ public:
+  
+  ActiveKey(const InternalKey internal_key, uint64_t file_num) {
+    internal_key_ = internal_key;
+    file_num_ = file_num_;
+  }
+
+  ActiveKey(const ActiveKey&) = delete;
+  ActiveKey& operator=(const ActiveKey&) = delete;
+
+  ~ActiveKey();
+
+  // Return an internal key (suitable for passing to an internal iterator)
+  InternalKey internal_key() const { return internal_key_; }
+  uint64_t file_num() const { return file_num_; }
+
+ private:
+  InternalKey internal_key_;
+  uint64_t file_num_;
+};
+
 }  // namespace leveldb
 
 #endif  // STORAGE_LEVELDB_DB_DBFORMAT_H_

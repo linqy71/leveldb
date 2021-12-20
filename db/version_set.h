@@ -23,6 +23,7 @@
 #include "db/version_edit.h"
 #include "port/port.h"
 #include "port/thread_annotations.h"
+#include "table/two_level_iterator_with_num.h"
 
 namespace leveldb {
 
@@ -38,6 +39,7 @@ class TableCache;
 class Version;
 class VersionSet;
 class WritableFile;
+class TwoLevelIteratorWithNum;
 
 // Return the smallest index i such that files[i]->largest >= key.
 // Return files.size() if there is no such file.
@@ -247,6 +249,8 @@ class VersionSet {
   // Create an iterator that reads over the compaction inputs for "*c".
   // The caller should delete the iterator when no longer needed.
   Iterator* MakeInputIterator(Compaction* c);
+
+  Iterator* MakeInputIteratorWithNum(Compaction* c);
 
   // Returns true iff some level needs a compaction.
   bool NeedsCompaction() const {

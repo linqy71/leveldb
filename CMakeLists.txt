@@ -169,6 +169,8 @@ target_sources(leveldb
     "table/merger.h"
     "table/table_builder.cc"
     "table/table.cc"
+    "table/two_level_iterator_with_num.cc"
+    "table/two_level_iterator_with_num.h"
     "table/two_level_iterator.cc"
     "table/two_level_iterator.h"
     "util/arena.cc"

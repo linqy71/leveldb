@@ -80,6 +80,8 @@ class LEVELDB_EXPORT Iterator {
   using CleanupFunction = void (*)(void* arg1, void* arg2);
   void RegisterCleanup(CleanupFunction function, void* arg1, void* arg2);
 
+  uint64_t current_filenum;
+
  private:
   // Cleanup functions are stored in a single-linked list.
   // The list's head node is inlined in the iterator.

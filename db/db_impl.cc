@@ -143,6 +143,8 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       logfile_number_(0),
       log_(nullptr),
       seed_(0),
+      keyupd_lru(nullptr),
+      score_tbl(nullptr),
       tmp_batch_(new WriteBatch),
       background_compaction_scheduled_(false),
       manual_compaction_(nullptr),
@@ -169,6 +171,9 @@ DBImpl::~DBImpl() {
   delete log_;
   delete logfile_;
   delete table_cache_;
+
+  delete keyupd_lru;
+  delete score_tbl;
 
   if (owns_info_log_) {
     delete options_.info_log;
@@ -502,6 +507,8 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
   return status;
 }
 
+//write imm to Level 0
+//imm iter and file number are here
 Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
                                 Version* base) {
   mutex_.AssertHeld();
@@ -512,11 +519,20 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
   Iterator* iter = mem->NewIterator();
   Log(options_.info_log, "Level-0 table #%llu: started",
       (unsigned long long)meta.number);
+  
+  // create a keyupd_lru and a score table
+  if (keyupd_lru == nullptr) {  
+    keyupd_lru = new KeyUpdLru(8 << 20);
+  }
+  if(score_tbl == nullptr) {
+    score_tbl = new ScoreTable();
+  }
 
   Status s;
   {
     mutex_.Unlock();
-    s = BuildTable(dbname_, env_, options_, table_cache_, iter, &meta);
+    s = BuildL0TableAndSaveToMap(dbname_, env_, options_, table_cache_, iter, 
+                    &meta, keyupd_lru, score_tbl);
     mutex_.Lock();
   }
 
@@ -1503,6 +1519,7 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
       impl->mem_ = new MemTable(impl->internal_comparator_);
       impl->mem_->Ref();
     }
+
   }
   if (s.ok() && save_manifest) {
     edit.SetPrevLogNumber(0);  // No older logs needed after recovery.

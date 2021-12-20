@@ -144,6 +144,8 @@ target_sources(leveldb
     "db/snapshot.h"
     "db/table_cache.cc"
     "db/table_cache.h"
+    "db/sst_score_table.h"
+    "db/keyupd_lru.h"
     "db/version_edit.cc"
     "db/version_edit.h"
     "db/version_set.cc"

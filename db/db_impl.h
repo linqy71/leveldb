@@ -17,6 +17,7 @@
 #include "leveldb/env.h"
 #include "port/port.h"
 #include "port/thread_annotations.h"
+#include "db/keyupd_lru.h"
 
 namespace leveldb {
 
@@ -181,6 +182,9 @@ class DBImpl : public DB {
   uint64_t logfile_number_ GUARDED_BY(mutex_);
   log::Writer* log_;
   uint32_t seed_ GUARDED_BY(mutex_);  // For sampling.
+
+  KeyUpdLru* keyupd_lru;
+  ScoreTable* score_tbl;
 
   // Queue of writers.
   std::deque<Writer*> writers_ GUARDED_BY(mutex_);

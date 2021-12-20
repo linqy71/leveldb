@@ -6,6 +6,7 @@
 #define STORAGE_LEVELDB_DB_BUILDER_H_
 
 #include "leveldb/status.h"
+#include "db/keyupd_lru.h"
 
 namespace leveldb {
 
@@ -24,6 +25,16 @@ class VersionEdit;
 // zero, and no Table file will be produced.
 Status BuildTable(const std::string& dbname, Env* env, const Options& options,
                   TableCache* table_cache, Iterator* iter, FileMetaData* meta);
+
+// Build a Table file from the contents of *iter.  The generated file
+// will be named according to meta->number.  On success, the rest of
+// *meta will be filled with metadata about the generated table.
+// If no data is present in *iter, meta->file_size will be set to
+// zero, and no Table file will be produced.
+// MeanWhile, save <key, file_number> to upd_map
+Status BuildL0TableAndSaveToMap(const std::string& dbname, Env* env, const Options& options,
+                  TableCache* table_cache, Iterator* iter, FileMetaData* meta, 
+                  KeyUpdLru* keyupd_lru, ScoreTable* score_tbl);
 
 }  // namespace leveldb
 

@@ -235,6 +235,8 @@ class VersionSet {
   // describes the compaction.  Caller should delete the result.
   Compaction* PickCompaction();
 
+  Compaction* PickCompactionByFile(uint64_t target_file);
+
   // Return a compaction object for compacting the range [begin,end] in
   // the specified level.  Returns nullptr if there is nothing in that
   // level that overlaps the specified range.  Caller should delete

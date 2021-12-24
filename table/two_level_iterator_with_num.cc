@@ -33,12 +33,11 @@ class TwoLevelIteratorWithNum : public Iterator {
     // data key + file_num
     Slice data_key = data_iter_.key();
     size_t data_size = data_key.size();
-    char* data_buf_;
-    memccpy(data_buf_, data_key.data(), 0, data_size);
+    memccpy(key_buf_, data_key.data(), 0, data_size);
     Slice index = index_iter_.value();
     uint64_t file_num = DecodeFixed64(index.data());
-    EncodeFixed64(data_buf_ + data_size, file_num);
-    return Slice(data_buf_, data_size + 8);
+    EncodeFixed64(key_buf_ + data_size, file_num);
+    return Slice(key_buf_, data_size + 8);
   }
   Slice value() const override {
     assert(Valid());
@@ -73,6 +72,7 @@ class TwoLevelIteratorWithNum : public Iterator {
   // If data_iter_ is non-null, then "data_block_handle_" holds the
   // "index_value" passed to block_function_ to create the data_iter_.
   std::string data_block_handle_;
+  mutable char key_buf_[100];
 };
 
 TwoLevelIteratorWithNum::TwoLevelIteratorWithNum(Iterator* index_iter,

@@ -11,7 +11,7 @@
 namespace leveldb {
 
 	// value -> void*
-	static void* EncodeValue(uintptr_t v) { return reinterpret_cast<void*>(v); }
+	static void* EncodeValue(uint64_t* v) { return reinterpret_cast<void*>(v); }
 
 	// void* -> value and delete
 	static void DeleteValue(const Slice& key, void* value) {
@@ -35,7 +35,7 @@ namespace leveldb {
 		// key is userkey
 		// if key already exists, the old SST_id score+1
 		void Add(Slice& key, uint64_t SST_id, ScoreTable* score_tbl) {
-
+			uint64_t* v_ptr = new uint64_t(SST_id);
 			Cache::Handle* handle = sstid_cache_->Lookup(key);
 			if (handle != nullptr) { //find key, so add score
 				uint64_t* id_ptr = reinterpret_cast<uint64_t*>(sstid_cache_->Value(handle));
@@ -44,7 +44,23 @@ namespace leveldb {
 				score_tbl->AddScore(*id_ptr);
 			}
 			
-			sstid_cache_->Insert(key, EncodeValue(SST_id), 1, DeleteValue);
+			sstid_cache_->Release(sstid_cache_->Insert(key, EncodeValue(v_ptr), 1, DeleteValue));
+		}
+
+		bool CompareAndUpdateSst(Slice& key, uint64_t old_id, uint64_t new_id) {
+			bool successful = false;
+			Cache::Handle* handle = sstid_cache_->Lookup(key);
+			if (handle != nullptr) { //find key
+				uint64_t* id_ptr = reinterpret_cast<uint64_t*>(sstid_cache_->Value(handle));
+				if (old_id == *id_ptr) {
+					sstid_cache_->Erase(key);
+					uint64_t* v_ptr = new uint64_t(new_id);
+					sstid_cache_->Release(sstid_cache_->Insert(key, EncodeValue(v_ptr), 1, DeleteValue));
+					successful = true;
+				}
+				sstid_cache_->Release(handle);
+			}
+			return successful;
 		}
 
 		bool FindSst(Slice& key, uint64_t* value) {

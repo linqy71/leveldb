@@ -18,6 +18,7 @@
 #include "table/two_level_iterator.h"
 #include "util/coding.h"
 #include "util/logging.h"
+#include "db/my_L0_iterator.h"
 
 namespace leveldb {
 
@@ -1255,21 +1256,27 @@ Iterator* VersionSet::MakeInputIteratorWithNum(Compaction* c) {
   options.verify_checksums = options_->paranoid_checks;
   options.fill_cache = false;
 
-  // Level-0 files will not do active compaction.  
-  if(c->level() == 0) return nullptr;
-
-  // For other levels,
+  // Level-0 files have to be merged together.  For other levels,
   // we will make a concatenating iterator per level.
   const int space = (c->level() == 0 ? c->inputs_[0].size() + 1 : 2);
   Iterator** list = new Iterator*[space];
   int num = 0;
   for (int which = 0; which < 2; which++) {
     if (!c->inputs_[which].empty()) {
-      // Create concatenating iterator for the files from this level
-      // each iterator's key() returns key with file_num
-      list[num++] = NewTwoLevelIteratorWithNum(
-          new Version::LevelFileNumIterator(icmp_, &c->inputs_[which]),
-          &GetFileIterator, table_cache_, options);
+      if (c->level() + which == 0) {
+        const std::vector<FileMetaData*>& files = c->inputs_[which];
+        for (size_t i = 0; i < files.size(); i++) {
+          list[num++] = new MyL0Iterator(table_cache_->NewIterator(options, files[i]->number,
+                                                  files[i]->file_size), files[i]->number);
+        }
+      } else {
+        // Create concatenating iterator for the files from this level
+        // each iterator's key() returns key with file_num
+        list[num++] = NewTwoLevelIteratorWithNum(
+            new Version::LevelFileNumIterator(icmp_, &c->inputs_[which]),
+            &GetFileIterator, table_cache_, options);
+      }
+      
     }
   }
   assert(num <= space);
@@ -1312,6 +1319,42 @@ Compaction* VersionSet::PickCompaction() {
   } else {
     return nullptr;
   }
+
+  c->input_version_ = current_;
+  c->input_version_->Ref();
+
+  // Files in level 0 may overlap each other, so pick up all overlapping ones
+  if (level == 0) {
+    InternalKey smallest, largest;
+    GetRange(c->inputs_[0], &smallest, &largest);
+    // Note that the next call will discard the file we placed in
+    // c->inputs_[0] earlier and replace it with an overlapping set
+    // which will include the picked file.
+    current_->GetOverlappingInputs(0, &smallest, &largest, &c->inputs_[0]);
+    assert(!c->inputs_[0].empty());
+  }
+
+  SetupOtherInputs(c);
+
+  return c;
+}
+
+Compaction* VersionSet::PickCompactionByFile(uint64_t target_num) {
+  Compaction* c = nullptr;
+  int level;
+
+  for (size_t l = 0; l < config::kNumLevels; l++) {
+    for (size_t i = 0; i < current_->files_[l].size(); i++) {
+      FileMetaData* f = current_->files_[l][i];
+      if (f->number == target_num) {
+        level = l;
+        c = new Compaction(options_, level);
+        c->inputs_[0].push_back(f);
+      }
+    }
+  }
+
+  if (c == nullptr) return nullptr;
 
   c->input_version_ = current_;
   c->input_version_->Ref();

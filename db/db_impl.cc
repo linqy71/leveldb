@@ -522,7 +522,7 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
   
   // create a keyupd_lru and a score table
   if (keyupd_lru == nullptr) {  
-    keyupd_lru = new KeyUpdLru(8 << 20);
+    keyupd_lru = new KeyUpdLru(64 << 20);
   }
   if(score_tbl == nullptr) {
     score_tbl = new ScoreTable();
@@ -553,6 +553,10 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
     }
     edit->AddFile(level, meta.number, meta.file_size, meta.smallest,
                   meta.largest);
+  }
+
+  if (score_tbl != nullptr) {
+    // MaybeScheduleCompaction();
   }
 
   CompactionStats stats;
@@ -686,11 +690,31 @@ void DBImpl::MaybeScheduleCompaction() {
   } else if (imm_ == nullptr && manual_compaction_ == nullptr &&
              !versions_->NeedsCompaction()) {
     // No work to be done
+  } else if (score_tbl != nullptr && score_tbl->GetHighScoreSst().score > 1000) {
+    background_compaction_scheduled_ = true;
+    env_->Schedule(&DBImpl::BGWork, this);
   } else {
     background_compaction_scheduled_ = true;
     env_->Schedule(&DBImpl::BGWork, this);
   }
 }
+
+// void DBImpl::MaybeActiveScheduleCompaction() {
+//   mutex_.AssertHeld();
+//   if (background_compaction_scheduled_) {
+//     // Already scheduled
+//   } else if (shutting_down_.load(std::memory_order_acquire)) {
+//     // DB is being deleted; no more background compactions
+//   } else if (!bg_error_.ok()) {
+//     // Already got an error; no more changes
+//   } else if (imm_ == nullptr && manual_compaction_ == nullptr &&
+//              !versions_->NeedsCompaction()) {
+//     // No work to be done
+//   } else {
+//     background_compaction_scheduled_ = true;
+//     env_->Schedule(&DBImpl::BGWork, this);
+//   }
+// }
 
 void DBImpl::BGWork(void* db) {
   reinterpret_cast<DBImpl*>(db)->BackgroundCall();
@@ -723,7 +747,7 @@ void DBImpl::BackgroundCompaction() {
     return;
   }
 
-  Compaction* c;
+  Compaction* c = nullptr;
   bool is_manual = (manual_compaction_ != nullptr);
   InternalKey manual_end;
   if (is_manual) {
@@ -739,7 +763,16 @@ void DBImpl::BackgroundCompaction() {
         (m->end ? m->end->DebugString().c_str() : "(end)"),
         (m->done ? "(end)" : manual_end.DebugString().c_str()));
   } else {
-    c = versions_->PickCompaction();
+    if (score_tbl != nullptr) {
+      ScoreSst target = score_tbl->GetHighScoreSst();
+      if(target.score > 1000) {
+        uint64_t target_file = target.sst_id;
+        c = versions_->PickCompactionByFile(target_file);
+      }
+    }
+    if (c == nullptr) {
+      c = versions_->PickCompaction();
+    } 
   }
 
   Status status;
@@ -752,6 +785,12 @@ void DBImpl::BackgroundCompaction() {
     c->edit()->RemoveFile(c->level(), f->number);
     c->edit()->AddFile(c->level() + 1, f->number, f->file_size, f->smallest,
                        f->largest);
+    // is trivial move but has large score
+    // means that old data contains in the single file
+    // delete score is ok
+    if (score_tbl != nullptr) {
+      score_tbl->RemoveSstScore(f->number);
+    }
     status = versions_->LogAndApply(c->edit(), &mutex_);
     if (!status.ok()) {
       RecordBackgroundError(status);
@@ -763,7 +802,7 @@ void DBImpl::BackgroundCompaction() {
         status.ToString().c_str(), versions_->LevelSummary(&tmp));
   } else {
     CompactionState* compact = new CompactionState(c);
-    status = DoCompactionWork(compact);
+    status = DoActiveCompactionWork(compact);
     if (!status.ok()) {
       RecordBackgroundError(status);
     }
@@ -975,15 +1014,6 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
         current_user_key.assign(ikey.user_key.data(), ikey.user_key.size());
         has_current_user_key = true;
         last_sequence_for_key = kMaxSequenceNumber;
-
-        // First occurrence, but if is old,
-        // then drop this key
-        uint64_t* newest_sstid = nullptr;
-        bool in_lru = keyupd_lru->FindSst(ikey.user_key, newest_sstid);
-        if (in_lru && (cur_file_num != *newest_sstid)) { //key is in lru and key's sst_id is not equal to current sst
-          drop = true;
-        }
-
       }
 
       if (last_sequence_for_key <= compact->smallest_snapshot) {
@@ -1014,6 +1044,17 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
         (int)last_sequence_for_key, (int)compact->smallest_snapshot);
 #endif
 
+    // First occurrence, but if is old,
+    // then drop this key
+    if (!drop) {
+      uint64_t newest_sstid;
+      bool in_lru = keyupd_lru->FindSst(ikey.user_key, &newest_sstid);
+      if (in_lru && (cur_file_num != newest_sstid)) { //key is in lru and key's sst_id is not equal to current sst
+        drop = true;
+      }
+    }
+    
+
     if (!drop) {
       // Open output file if necessary
       if (compact->builder == nullptr) {
@@ -1027,6 +1068,12 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
       }
       compact->current_output()->largest.DecodeFrom(key);
       compact->builder->Add(key, input->value());
+
+      //should update keyupd_lru
+      if (keyupd_lru != nullptr) {
+        Slice user_k = ExtractUserKey(key);
+        keyupd_lru->CompareAndUpdateSst(user_k, cur_file_num, compact->current_output()->number);
+      }
 
       // Close output file if it is big enough
       if (compact->builder->FileSize() >=
@@ -1058,6 +1105,10 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
   for (int which = 0; which < 2; which++) {
     for (int i = 0; i < compact->compaction->num_input_files(which); i++) {
       stats.bytes_read += compact->compaction->input(which, i)->file_size;
+      // delete score entry
+      if(score_tbl != nullptr) {
+        score_tbl->RemoveSstScore(compact->compaction->input(which, i)->number);
+      }
     }
   }
   for (size_t i = 0; i < compact->outputs.size(); i++) {
@@ -1081,6 +1132,8 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
 Status DBImpl::DoCompactionWork(CompactionState* compact) {
   const uint64_t start_micros = env_->NowMicros();
   int64_t imm_micros = 0;  // Micros spent doing imm_ compactions
+
+  printf("warning, normal compaction should not be called!\n");
 
   Log(options_.info_log, "Compacting %d@%d + %d@%d files",
       compact->compaction->num_input_files(0), compact->compaction->level(),

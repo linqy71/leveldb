@@ -6,6 +6,11 @@
 
 namespace leveldb {
 
+	struct ScoreSst {
+		int score;
+		uint64_t sst_id;
+	};
+
 	class ScoreTable {
 		public:
 
@@ -24,15 +29,18 @@ namespace leveldb {
 				score_table.erase(sst_id);
 			}
 
-			uint64_t GetHighScoreSst() {
-				uint64_t result = 0;
+			ScoreSst GetHighScoreSst() {
+				uint64_t sst_id = 0;
 				int cur_high_score = -1;
 				for (auto it: score_table) {
 					if (it.second > cur_high_score) {
 						cur_high_score = it.second;
-						result = it.first;
+						sst_id = it.first;
 					}
 				}
+				ScoreSst result;
+				result.score = cur_high_score;
+				result.sst_id = sst_id;
 				return result;
 			}
 

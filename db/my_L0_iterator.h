@@ -48,7 +48,7 @@ namespace leveldb {
 
 			Slice key() const override {
 				Slice key = table_cache_iter_->key();
-				memccpy(key_buf, key.data(), 0, key.size());
+				memcpy(key_buf, key.data(), key.size());
 				EncodeFixed64(key_buf + key.size(), file_num_);
 				return Slice(key_buf, key.size() + 8);
 			}

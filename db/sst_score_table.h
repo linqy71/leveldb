@@ -29,6 +29,10 @@ namespace leveldb {
 				score_table.erase(sst_id);
 			}
 
+			bool Find(uint64_t sst_id) {
+				return score_table.find(sst_id) != score_table.end();
+			}
+
 			ScoreSst GetHighScoreSst() {
 				uint64_t sst_id = 0;
 				int cur_high_score = -1;

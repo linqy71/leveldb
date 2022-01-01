@@ -168,6 +168,8 @@ target_sources(leveldb
     "table/iterator.cc"
     "table/merger.cc"
     "table/merger.h"
+    "table/merger_n.cc"
+    "table/merger_n.h"
     "table/table_builder.cc"
     "table/table.cc"
     "table/two_level_iterator_with_num.cc"

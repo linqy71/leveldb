@@ -556,7 +556,7 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
   }
 
   if (score_tbl != nullptr) {
-    // MaybeScheduleCompaction();
+    MaybeScheduleCompaction();
   }
 
   CompactionStats stats;
@@ -765,7 +765,7 @@ void DBImpl::BackgroundCompaction() {
   } else {
     if (score_tbl != nullptr) {
       ScoreSst target = score_tbl->GetHighScoreSst();
-      if(target.score > 1000) {
+      if(target.score > 3000) {
         uint64_t target_file = target.sst_id;
         c = versions_->PickCompactionByFile(target_file);
       }
@@ -790,6 +790,7 @@ void DBImpl::BackgroundCompaction() {
     // delete score is ok
     if (score_tbl != nullptr) {
       score_tbl->RemoveSstScore(f->number);
+      assert(!score_tbl->Find(f->number));
     }
     status = versions_->LogAndApply(c->edit(), &mutex_);
     if (!status.ok()) {
@@ -1107,7 +1108,9 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
       stats.bytes_read += compact->compaction->input(which, i)->file_size;
       // delete score entry
       if(score_tbl != nullptr) {
-        score_tbl->RemoveSstScore(compact->compaction->input(which, i)->number);
+        uint64_t cur_num = compact->compaction->input(which, i)->number;
+        score_tbl->RemoveSstScore(cur_num);
+        assert(!score_tbl->Find(cur_num));
       }
     }
   }

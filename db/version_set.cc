@@ -19,6 +19,7 @@
 #include "util/coding.h"
 #include "util/logging.h"
 #include "db/my_L0_iterator.h"
+#include "table/merger_n.h"
 
 namespace leveldb {
 
@@ -1280,7 +1281,7 @@ Iterator* VersionSet::MakeInputIteratorWithNum(Compaction* c) {
     }
   }
   assert(num <= space);
-  Iterator* result = NewMergingIterator(&icmp_, list, num);
+  Iterator* result = NewMergingIteratorWithNum(&icmp_, list, num);
   delete[] list;
   return result;
 }
@@ -1292,7 +1293,8 @@ Compaction* VersionSet::PickCompaction() {
   // We prefer compactions triggered by too much data in a level over
   // the compactions triggered by seeks.
   const bool size_compaction = (current_->compaction_score_ >= 1);
-  const bool seek_compaction = (current_->file_to_compact_ != nullptr);
+  // const bool seek_compaction = (current_->file_to_compact_ != nullptr);
+  const bool seek_compaction = false;
   if (size_compaction) {
     level = current_->compaction_level_;
     assert(level >= 0);
@@ -1343,7 +1345,7 @@ Compaction* VersionSet::PickCompactionByFile(uint64_t target_num) {
   Compaction* c = nullptr;
   int level;
 
-  for (size_t l = 0; l < config::kNumLevels; l++) {
+  for (size_t l = 0; l < config::kNumLevels - 1; l++) {
     for (size_t i = 0; i < current_->files_[l].size(); i++) {
       FileMetaData* f = current_->files_[l][i];
       if (f->number == target_num) {

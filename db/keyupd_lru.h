@@ -39,9 +39,9 @@ namespace leveldb {
 			Cache::Handle* handle = sstid_cache_->Lookup(key);
 			if (handle != nullptr) { //find key, so add score
 				uint64_t* id_ptr = reinterpret_cast<uint64_t*>(sstid_cache_->Value(handle));
-				sstid_cache_->Release(handle);
 				//old id score +1
 				score_tbl->AddScore(*id_ptr);
+				sstid_cache_->Release(handle);
 			}
 			
 			sstid_cache_->Release(sstid_cache_->Insert(key, EncodeValue(v_ptr), 1, DeleteValue));
@@ -68,7 +68,7 @@ namespace leveldb {
 			Cache::Handle* handle = sstid_cache_->Lookup(key);
 			if (handle != nullptr) { //find key
 				uint64_t* id_ptr = reinterpret_cast<uint64_t*>(sstid_cache_->Value(handle));
-				value = id_ptr;
+				*value = *id_ptr;
 				sstid_cache_->Release(handle);
 				return true;
 			}

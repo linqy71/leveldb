@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 
 #include "leveldb/cache.h"
 #include "leveldb/comparator.h"
@@ -47,11 +48,17 @@
 static const char* FLAGS_benchmarks =
     "fillseq,"
     "fillsync,"
+    "test,"
     "fillrandom,"
+    "fillfromfile,"
+    "dupfillseq,"
+    "dupfillrandom,"
     "overwrite,"
     "readrandom,"
+    "readrandomfixed,"
     "readrandom,"  // Extra run to allow previous compactions to quiesce
     "readseq,"
+    "readfromfile,"
     "readreverse,"
     "compact,"
     "readrandom,"
@@ -110,6 +117,8 @@ static int FLAGS_bloom_bits = -1;
 // Common key prefix length.
 static int FLAGS_key_prefix = 0;
 
+static int FLAGS_key_size = 64;
+
 // If true, do not destroy the existing database.  If you set this
 // flag and also specify a benchmark that wants a fresh database, that
 // benchmark will fail.
@@ -120,6 +129,9 @@ static bool FLAGS_reuse_logs = false;
 
 // Use the db with the following name.
 static const char* FLAGS_db = nullptr;
+
+static int FLAGS_dup_ratio = 1;
+static const char* FLAGS_key_file_path = nullptr;
 
 namespace leveldb {
 
@@ -327,6 +339,10 @@ class Stats {
                  name.ToString().c_str(), seconds_ * 1e6 / done_,
                  (extra.empty() ? "" : " "), extra.c_str());
     if (FLAGS_histogram) {
+      std::fprintf(stdout, "99.0% Microseconds per op: %11.3f\n", hist_.Percentile(99.0));
+      std::fprintf(stdout, "99.9% Microseconds per op: %11.3f\n", hist_.Percentile(99.9));
+      std::fprintf(stdout, "99.99% Microseconds per op: %11.3f\n", hist_.Percentile(99.99));
+      std::fprintf(stdout, "99.999% Microseconds per op: %11.3f\n", hist_.Percentile(99.999));
       std::fprintf(stdout, "Microseconds per op:\n%s\n",
                    hist_.ToString().c_str());
     }
@@ -381,7 +397,7 @@ class Benchmark {
   int total_thread_count_;
 
   void PrintHeader() {
-    const int kKeySize = 16 + FLAGS_key_prefix;
+    const int kKeySize = FLAGS_key_size + FLAGS_key_prefix;
     PrintEnvironment();
     std::fprintf(stdout, "Keys:       %d bytes each\n", kKeySize);
     std::fprintf(
@@ -528,9 +544,21 @@ class Benchmark {
         fresh_db = true;
         entries_per_batch_ = 1000;
         method = &Benchmark::WriteSeq;
+      } else if (name == Slice("test")) {
+        fresh_db = true;
+        method = &Benchmark::Test;
       } else if (name == Slice("fillrandom")) {
         fresh_db = true;
         method = &Benchmark::WriteRandom;
+      } else if (name == Slice("fillfromfileall")) {
+        fresh_db = true;
+        method = &Benchmark::WriteFromFile;
+      } else if (name == Slice("fillfromfilerepeat")) {
+        fresh_db = false;
+        method = &Benchmark::WriteFromFileRepeat;
+      } else if (name == Slice("fillfromfilerepeatN")) {
+        fresh_db = true;
+        method = &Benchmark::WriteFromFileRepeatN;
       } else if (name == Slice("overwrite")) {
         fresh_db = false;
         method = &Benchmark::WriteRandom;
@@ -552,6 +580,8 @@ class Benchmark {
         method = &Benchmark::ReadRandom;
       } else if (name == Slice("readmissing")) {
         method = &Benchmark::ReadMissing;
+      } else if (name == Slice("readfromfile")) {
+        method = &Benchmark::ReadFromFile;
       } else if (name == Slice("seekrandom")) {
         method = &Benchmark::SeekRandom;
       } else if (name == Slice("seekordered")) {
@@ -582,6 +612,14 @@ class Benchmark {
         PrintStats("leveldb.stats");
       } else if (name == Slice("sstables")) {
         PrintStats("leveldb.sstables");
+      } else if (name == Slice("dupfillrandom")) {
+        fresh_db = true;
+        method = &Benchmark::DupWriteRandom;
+      } else if (name == Slice("dupfillseq")) {
+        fresh_db = true;
+        method = &Benchmark::DupWriteSeq;
+      } else if (name == Slice("readrandomfixed")) {
+        method = &Benchmark::ReadRandomFixed;
       } else {
         if (!name.empty()) {  // No error message for empty name
           std::fprintf(stderr, "unknown benchmark '%s'\n",
@@ -786,9 +824,48 @@ class Benchmark {
     }
   }
 
+  void Test(ThreadState* thread) {
+    // if (num_ != FLAGS_num) {
+    //   char msg[100];
+    //   std::snprintf(msg, sizeof(msg), "(%d ops)", num_);
+    //   thread->stats.AddMessage(msg);
+    // }
+    RandomGenerator gen;
+    WriteBatch batch;
+    Status s;
+    int64_t bytes = 0;
+    KeyBuffer key;
+
+    for(int loop = 0; loop < 2; loop++) {
+      for (int i = 0; i < 100000; i ++) {
+        key.Set(i);   
+        batch.Clear();
+        batch.Put(key.slice(), gen.Generate(value_size_));
+        s = db_->Write(write_options_, &batch);
+        if (!s.ok()) {
+          std::fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+          std::exit(1);
+        } 
+        bytes += value_size_ + key.slice().size();
+      }
+    }
+    thread->stats.AddBytes(bytes);
+  }
+
   void WriteSeq(ThreadState* thread) { DoWrite(thread, true); }
+  void DupWriteSeq(ThreadState* thread) { DoDupWrite(thread, true, FLAGS_dup_ratio); }
 
   void WriteRandom(ThreadState* thread) { DoWrite(thread, false); }
+
+  void DupWriteRandom(ThreadState* thread) { DoDupWrite(thread, false, FLAGS_dup_ratio); }
+  void WriteFromFile(ThreadState* thread) { DoWriteFromFileALL(thread, FLAGS_key_file_path); }
+  void WriteFromFileRepeat(ThreadState* thread) {DoWriteFromFileDup1(thread, FLAGS_key_file_path); }
+  void ReadFromFile(ThreadState* thread) { DoReadFromFile(thread, FLAGS_key_file_path, FLAGS_dup_ratio); }
+
+  void WriteFromFileRepeatN(ThreadState* thread) {
+    DoWriteFromFileRepeatN(thread, FLAGS_key_file_path, FLAGS_dup_ratio);
+  }
+
 
   void DoWrite(ThreadState* thread, bool seq) {
     if (num_ != FLAGS_num) {
@@ -818,6 +895,226 @@ class Benchmark {
       }
     }
     thread->stats.AddBytes(bytes);
+  }
+
+  void DoDupWrite(ThreadState* thread, bool seq, int dup_ratio) {
+    if (num_ != FLAGS_num) {
+      char msg[100];
+      std::snprintf(msg, sizeof(msg), "(%d ops)", num_);
+      thread->stats.AddMessage(msg);
+    }
+
+    RandomGenerator gen;
+    WriteBatch batch;
+    Status s;
+    int64_t bytes = 0;
+    KeyBuffer key;
+    for(int t = 0; t < dup_ratio; t++){
+      for (int i = 0; i < num_; i += entries_per_batch_) {
+        batch.Clear();
+        for (int j = 0; j < entries_per_batch_; j++) {
+          const int k = seq ? i + j : thread->rand.Uniform(FLAGS_num);
+          key.Set(k);
+          batch.Put(key.slice(), gen.Generate(value_size_));
+          bytes += value_size_ + key.slice().size();
+          thread->stats.FinishedSingleOp();
+        }
+        s = db_->Write(write_options_, &batch);
+        if (!s.ok()) {
+          std::fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+          std::exit(1);
+        }
+      }
+    }
+    thread->stats.AddBytes(bytes);
+  }
+
+  void DoReadFromFile(ThreadState* thread, const char* file_path, int n) {
+    ReadOptions options;
+    std::string value;
+    int found = 0;
+    KeyBuffer key;
+    // file_path is file name path
+    std::ifstream fname(file_path, std::ios::binary);
+    fname.clear();
+    if(!fname) {
+      fprintf(stderr, "file %s not exist! \n", file_path);
+      return ;
+    }
+    std::string name;
+    int rows = 0;
+    int num_key = 0;
+    int total_file_num = 2000;
+    int actual_file_num = 2000 / n;
+    std::string base_str = "/home/lqy/generate_data/rand_files/";
+    // read all keys of db
+    while(getline(fname, name)){
+
+      std::string data_path = base_str + name;
+      std::ifstream fdata(data_path.c_str(), std::ios::binary);
+      fdata.clear();
+      std::string data;
+      while (getline(fdata, data)) {
+        Slice key(data);
+        if (db_->Get(options, key, &value).ok()) {
+          found++;
+        }
+        thread->stats.FinishedSingleOp();
+        num_key++;
+      }
+      fdata.close();
+      rows++;
+      if (rows >= actual_file_num) {
+        break;
+      }
+
+    }
+    fname.close();
+    char msg[100];
+    std::snprintf(msg, sizeof(msg), "(%d of %d found)", found, num_key);
+    thread->stats.AddMessage(msg);
+  }
+
+  void DoWriteFromFileALL(ThreadState* thread, const char* file_path) {
+    if (num_ != FLAGS_num) {
+      char msg[100];
+      std::snprintf(msg, sizeof(msg), "(%d ops)", num_);
+      thread->stats.AddMessage(msg);
+    }
+
+    RandomGenerator gen;
+    WriteBatch batch;
+    Status s;
+    int64_t bytes = 0;
+
+    // open file
+    std::ifstream fin(file_path, std::ios::binary);
+    fin.clear();
+    if(!fin) {
+      fprintf(stderr, "file %s not exist! \n", file_path);
+      return ;
+    }
+    int rows = 0;
+    std::string line;
+    // write all rows into db
+    // calculate row number
+    while(getline(fin, line)){
+      rows++;
+      batch.Clear();
+      Slice key(line);
+      batch.Put(key, gen.Generate(value_size_));
+      bytes += value_size_ + key.size();
+      s = db_->Write(write_options_, &batch);
+      if (!s.ok()) {
+        std::fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+        std::exit(1);
+      }
+      thread->stats.FinishedSingleOp();
+    }
+    thread->stats.AddBytes(bytes);
+    fin.close();
+    std::fprintf(stdout, "file row number:    %d, no repeat\n", rows);
+  }
+
+  //repeat 90% file key for 1 time
+  void DoWriteFromFileDup1(ThreadState* thread, const char* file_path) {
+    if (num_ != FLAGS_num) {
+      char msg[100];
+      std::snprintf(msg, sizeof(msg), "(%d ops)", num_);
+      thread->stats.AddMessage(msg);
+    }
+
+    RandomGenerator gen;
+    WriteBatch batch;
+    Status s;
+    int64_t bytes = 0;
+
+    // open file
+    std::ifstream fin(file_path, std::ios::binary);
+    fin.clear();
+    if(!fin) {
+      fprintf(stderr, "file %s not exist! \n", file_path);
+      return ;
+    }
+    int rows = 0;
+    int max_row = 900000000;
+    std::string line;
+    // write 90% rows into db
+    while(getline(fin, line)){
+      rows++;
+      if(rows == max_row) break;
+      batch.Clear();
+      Slice key(line);
+      batch.Put(key, gen.Generate(value_size_));
+      bytes += value_size_ + key.size();
+      s = db_->Write(write_options_, &batch);
+      if (!s.ok()) {
+        std::fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+        std::exit(1);
+      }
+      thread->stats.FinishedSingleOp();
+    }
+    thread->stats.AddBytes(bytes);
+    fin.close();
+    std::fprintf(stdout, "file row number:    %d, repeat for 1 times\n", rows);
+  }
+
+  void DoWriteFromFileRepeatN(ThreadState* thread, const char* file_path, int n) {
+    if (num_ != FLAGS_num) {
+      char msg[100];
+      std::snprintf(msg, sizeof(msg), "(%d ops)", num_);
+      thread->stats.AddMessage(msg);
+    }
+
+    RandomGenerator gen;
+    WriteBatch batch;
+    Status s;
+    int64_t bytes = 0;
+
+    int total_file_num = 2000;
+    int actual_file_num = 2000 / n;
+
+    // file_path is name file path
+    std::ifstream fname(file_path, std::ios::binary);
+    fname.clear();
+    if(!fname) {
+      fprintf(stderr, "file %s not exist! \n", file_path);
+      return ;
+    }
+    int rows = 0;
+    std::string name;
+    std::string base_str = "/home/lqy/generate_data/rand_files/";
+    // write 90% rows into db
+    while(getline(fname, name)){
+      std::string data_path = base_str + name;
+      int repeat = n;
+      if( rows % 10 == 0) {
+        repeat = 1;
+      }
+      for (int i = 0; i < repeat; i++) {
+        std::ifstream fdata(data_path.c_str(), std::ios::binary);
+        fdata.clear();
+        std::string data;
+        while (getline(fdata, data)) {
+          batch.Clear();
+          Slice key(data);
+          batch.Put(key, gen.Generate(value_size_));
+          bytes += value_size_ + key.size();
+          s = db_->Write(write_options_, &batch);
+          if (!s.ok()) {
+            std::fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+            std::exit(1);
+          }
+          thread->stats.FinishedSingleOp();
+        }
+        fdata.close();
+      }
+      rows++;
+      if (rows >= actual_file_num) break;
+    }
+    thread->stats.AddBytes(bytes);
+    fname.close();
+    std::fprintf(stdout, "file number:    %d, repeat for %d times\n", rows, n);
   }
 
   void ReadSequential(ThreadState* thread) {
@@ -861,6 +1158,25 @@ class Benchmark {
     }
     char msg[100];
     std::snprintf(msg, sizeof(msg), "(%d of %d found)", found, num_);
+    thread->stats.AddMessage(msg);
+  }
+
+  void ReadRandomFixed(ThreadState* thread) {
+    ReadOptions options;
+    std::string value;
+    int found = 0;
+    KeyBuffer key;
+    int fix_num = 100000000;
+    for (int i = 0; i < fix_num; i++) {
+      const int k = thread->rand.Uniform(fix_num);
+      key.Set(k);
+      if (db_->Get(options, key.slice(), &value).ok()) {
+        found++;
+      }
+      thread->stats.FinishedSingleOp();
+    }
+    char msg[100];
+    std::snprintf(msg, sizeof(msg), "(%d of %d found)", found, fix_num);
     thread->stats.AddMessage(msg);
   }
 
@@ -1069,6 +1385,10 @@ int main(int argc, char** argv) {
       FLAGS_open_files = n;
     } else if (strncmp(argv[i], "--db=", 5) == 0) {
       FLAGS_db = argv[i] + 5;
+    } else if (sscanf(argv[i], "--dup_ratio=%d%c", &n, &junk) == 1) {
+      FLAGS_dup_ratio = n;
+    } else if (strncmp(argv[i], "--key_file_path=", 16) == 0) {
+      FLAGS_key_file_path = argv[i] + 16;
     } else {
       std::fprintf(stderr, "Invalid flag '%s'\n", argv[i]);
       std::exit(1);

@@ -33,7 +33,7 @@ class TwoLevelIteratorWithNum : public Iterator {
     // data key + file_num
     Slice data_key = data_iter_.key();
     size_t data_size = data_key.size();
-    memccpy(key_buf_, data_key.data(), 0, data_size);
+    memcpy(key_buf_, data_key.data(), data_size);
     Slice index = index_iter_.value();
     uint64_t file_num = DecodeFixed64(index.data());
     EncodeFixed64(key_buf_ + data_size, file_num);

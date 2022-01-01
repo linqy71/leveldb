@@ -1,0 +1,16 @@
+CC=gcc
+CXX=g++
+FLAGS= -O4 -Ofast -march=native -fopenmp
+CFLAGS= $(FLAGS) $(shell pkg-config --cflags gflags)
+CXXFLAGS= -std=c++11
+LDFLAGS= -lgflags -lrt -lleveldb -lsnappy
+
+OBJS= bench.hpp test_leveldb.cpp
+
+ALL: test_leveldb
+
+test_leveldb : ${OBJS}
+	g++ ${OBJS} -o test_leveldb $(CXXFLAGS) $(LDFLAGS)
+
+clean:
+	rm *.o *.a *.exec

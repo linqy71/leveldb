@@ -101,8 +101,10 @@ Status BuildL0TableAndSaveToMap(const std::string& dbname, Env* env, const Optio
     for (; iter->Valid(); iter->Next()) {
       key = iter->key();
       builder->Add(key, iter->value());
-      user_key = ExtractUserKey(key);
-      keyupd_lru->Add(user_key, meta->number, score_tbl);
+      if(keyupd_lru) {
+        user_key = ExtractUserKey(key);
+        keyupd_lru->Add(user_key, meta->number, score_tbl);
+      }
     }
     if (!key.empty()) {
       meta->largest.DecodeFrom(key);

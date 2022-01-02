@@ -18,6 +18,7 @@
 #include "port/port.h"
 #include "port/thread_annotations.h"
 #include "db/keyupd_lru.h"
+#include "util/counting_bloomfilter.h"
 
 namespace leveldb {
 
@@ -26,6 +27,7 @@ class TableCache;
 class Version;
 class VersionEdit;
 class VersionSet;
+class CountingBloomFilter;
 
 class DBImpl : public DB {
  public:
@@ -149,8 +151,9 @@ class DBImpl : public DB {
   Status DoCompactionWork(CompactionState* compact)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
-  Status OpenCompactionOutputFile(CompactionState* compact);
+  Status OpenCompactionOutputFile(CompactionState* compact, bool hot);
   Status FinishCompactionOutputFile(CompactionState* compact, Iterator* input);
+  Status FinishCompactionOutputFileHot(CompactionState* compact, Iterator* input);
   Status InstallCompactionResults(CompactionState* compact)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
@@ -187,6 +190,7 @@ class DBImpl : public DB {
 
   KeyUpdLru* keyupd_lru;
   ScoreTable* score_tbl;
+  CountingBloomFilter* cbf;
 
   // Queue of writers.
   std::deque<Writer*> writers_ GUARDED_BY(mutex_);

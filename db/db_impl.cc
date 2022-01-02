@@ -61,11 +61,15 @@ struct DBImpl::CompactionState {
 
   Output* current_output() { return &outputs[outputs.size() - 1]; }
 
+  Output* current_output_hot() { return &outputs_hot[outputs_hot.size() - 1]; }
+
   explicit CompactionState(Compaction* c)
       : compaction(c),
         smallest_snapshot(0),
         outfile(nullptr),
         builder(nullptr),
+        outfile_hot(nullptr),
+        builder_hot(nullptr),
         total_bytes(0) {}
 
   Compaction* const compaction;
@@ -77,10 +81,15 @@ struct DBImpl::CompactionState {
   SequenceNumber smallest_snapshot;
 
   std::vector<Output> outputs;
+  std::vector<Output> outputs_hot;
 
   // State kept for output being generated
   WritableFile* outfile;
   TableBuilder* builder;
+
+  // State kept for output being generated
+  WritableFile* outfile_hot;
+  TableBuilder* builder_hot;
 
   uint64_t total_bytes;
 };
@@ -145,6 +154,7 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       seed_(0),
       keyupd_lru(nullptr),
       score_tbl(nullptr),
+      cbf(nullptr),
       tmp_batch_(new WriteBatch),
       background_compaction_scheduled_(false),
       manual_compaction_(nullptr),
@@ -174,6 +184,7 @@ DBImpl::~DBImpl() {
 
   delete keyupd_lru;
   delete score_tbl;
+  delete cbf;
 
   if (owns_info_log_) {
     delete options_.info_log;
@@ -521,10 +532,10 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
       (unsigned long long)meta.number);
   
   // create a keyupd_lru and a score table
-  if (keyupd_lru == nullptr) {  
+  if (keyupd_lru == nullptr && options_.UPD_ON) {  
     keyupd_lru = new KeyUpdLru(64 << 20);
   }
-  if(score_tbl == nullptr) {
+  if(score_tbl == nullptr && options_.UPD_ON) {
     score_tbl = new ScoreTable();
   }
 
@@ -846,16 +857,32 @@ void DBImpl::CleanupCompaction(CompactionState* compact) {
     assert(compact->outfile == nullptr);
   }
   delete compact->outfile;
+  if (compact->builder_hot != nullptr) {
+    // May happen if we get a shutdown call in the middle of compaction
+    compact->builder_hot->Abandon();
+    delete compact->builder_hot;
+  } else {
+    assert(compact->outfile_hot == nullptr);
+  }
+  delete compact->outfile_hot;
   for (size_t i = 0; i < compact->outputs.size(); i++) {
     const CompactionState::Output& out = compact->outputs[i];
+    pending_outputs_.erase(out.number);
+  }
+  for (size_t i = 0; i < compact->outputs_hot.size(); i++) {
+    const CompactionState::Output& out = compact->outputs_hot[i];
     pending_outputs_.erase(out.number);
   }
   delete compact;
 }
 
-Status DBImpl::OpenCompactionOutputFile(CompactionState* compact) {
+Status DBImpl::OpenCompactionOutputFile(CompactionState* compact, bool hot) {
   assert(compact != nullptr);
-  assert(compact->builder == nullptr);
+  if(hot){
+    assert(compact->builder_hot == nullptr);
+  } else {
+    assert(compact->builder == nullptr);
+  }
   uint64_t file_number;
   {
     mutex_.Lock();
@@ -865,15 +892,72 @@ Status DBImpl::OpenCompactionOutputFile(CompactionState* compact) {
     out.number = file_number;
     out.smallest.Clear();
     out.largest.Clear();
-    compact->outputs.push_back(out);
+    if(hot){
+      compact->outputs_hot.push_back(out);
+    } else {
+      compact->outputs.push_back(out);
+    }
     mutex_.Unlock();
   }
 
   // Make the output file
   std::string fname = TableFileName(dbname_, file_number);
-  Status s = env_->NewWritableFile(fname, &compact->outfile);
+  Status s = hot? env_->NewWritableFile(fname, &compact->outfile_hot): 
+            env_->NewWritableFile(fname, &compact->outfile);
   if (s.ok()) {
-    compact->builder = new TableBuilder(options_, compact->outfile);
+    if(hot){
+      compact->builder_hot = new TableBuilder(options_, compact->outfile_hot);
+    } else {
+      compact->builder = new TableBuilder(options_, compact->outfile);
+    }
+  }
+  return s;
+}
+
+Status DBImpl::FinishCompactionOutputFileHot(CompactionState* compact, Iterator* input){
+  assert(compact != nullptr);
+  assert(compact->outfile_hot != nullptr);
+  assert(compact->builder_hot != nullptr);
+
+  const uint64_t output_number = compact->current_output_hot()->number;
+  assert(output_number != 0);
+
+  // Check for iterator errors
+  Status s = input->status();
+  const uint64_t current_entries = compact->builder_hot->NumEntries();
+  if (s.ok()) {
+    s = compact->builder_hot->Finish();
+  } else {
+    compact->builder_hot->Abandon();
+  }
+  const uint64_t current_bytes = compact->builder_hot->FileSize();
+  compact->current_output_hot()->file_size = current_bytes;
+  compact->total_bytes += current_bytes;
+  delete compact->builder_hot;
+  compact->builder_hot = nullptr;
+
+  // Finish and check for file errors
+  if (s.ok()) {
+    s = compact->outfile_hot->Sync();
+  }
+  if (s.ok()) {
+    s = compact->outfile_hot->Close();
+  }
+  delete compact->outfile_hot;
+  compact->outfile_hot = nullptr;
+
+  if (s.ok() && current_entries > 0) {
+    // Verify that the table is usable
+    Iterator* iter =
+        table_cache_->NewIterator(ReadOptions(), output_number, current_bytes);
+    s = iter->status();
+    delete iter;
+    if (s.ok()) {
+      Log(options_.info_log, "Generated table #%llu@%d: %lld keys, %lld bytes",
+          (unsigned long long)output_number, compact->compaction->level(),
+          (unsigned long long)current_entries,
+          (unsigned long long)current_bytes);
+    }
   }
   return s;
 }
@@ -937,6 +1021,11 @@ Status DBImpl::InstallCompactionResults(CompactionState* compact) {
   // Add compaction outputs
   compact->compaction->AddInputDeletions(compact->compaction->edit());
   const int level = compact->compaction->level();
+  for (size_t i = 0; i < compact->outputs_hot.size(); i++) {
+    const CompactionState::Output& out = compact->outputs_hot[i];
+    compact->compaction->edit()->AddFile(level, out.number, out.file_size,
+                                         out.smallest, out.largest);
+  }
   for (size_t i = 0; i < compact->outputs.size(); i++) {
     const CompactionState::Output& out = compact->outputs[i];
     compact->compaction->edit()->AddFile(level + 1, out.number, out.file_size,
@@ -974,6 +1063,9 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
   std::string current_user_key;
   bool has_current_user_key = false;
   SequenceNumber last_sequence_for_key = kMaxSequenceNumber;
+  Slice input_level_smallest = compact->compaction->input(0,0)->smallest.Encode();
+  Slice input_level_largest = compact->compaction->input(0,0)->largest.Encode();
+ 
   while (input->Valid() && !shutting_down_.load(std::memory_order_acquire)) {
     // Prioritize immutable compaction work
     if (has_imm_.load(std::memory_order_relaxed)) {
@@ -1047,7 +1139,7 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
 
     // First occurrence, but if is old,
     // then drop this key
-    if (!drop) {
+    if (!drop && keyupd_lru) {
       uint64_t newest_sstid;
       bool in_lru = keyupd_lru->FindSst(ikey.user_key, &newest_sstid);
       if (in_lru && (cur_file_num != newest_sstid)) { //key is in lru and key's sst_id is not equal to current sst
@@ -1057,31 +1149,73 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
     
 
     if (!drop) {
-      // Open output file if necessary
-      if (compact->builder == nullptr) {
-        status = OpenCompactionOutputFile(compact);
-        if (!status.ok()) {
-          break;
+
+      bool hot = false;
+      if (cbf != nullptr && cbf->KeyCounter(ikey.user_key) >= 8) { // the threshold is to be determined
+        if(user_comparator()->Compare(key, input_level_smallest) >= 0 &&
+          user_comparator()->Compare(key, input_level_largest) <= 0) {
+          //when compact from level to level+1
+          //hot key must be larger than input_level_smallest and smaller than input_level_largest
+          hot = true;
         }
       }
-      if (compact->builder->NumEntries() == 0) {
-        compact->current_output()->smallest.DecodeFrom(key);
-      }
-      compact->current_output()->largest.DecodeFrom(key);
-      compact->builder->Add(key, input->value());
 
-      //should update keyupd_lru
-      if (keyupd_lru != nullptr) {
-        Slice user_k = ExtractUserKey(key);
-        keyupd_lru->CompareAndUpdateSst(user_k, cur_file_num, compact->current_output()->number);
-      }
+      // Open output file if necessary
+      if (hot) {
+        if(compact->builder_hot == nullptr) {
+          status = OpenCompactionOutputFile(compact, true);
+          if (!status.ok()) {
+            break;
+          }
+        }
+        assert(compact->builder_hot != nullptr);
+        if (compact->builder_hot->NumEntries() == 0) {
+          compact->current_output_hot()->smallest.DecodeFrom(key);
+        }
+        compact->current_output_hot()->largest.DecodeFrom(key);
+        compact->builder_hot->Add(key, input->value());
 
-      // Close output file if it is big enough
-      if (compact->builder->FileSize() >=
-          compact->compaction->MaxOutputFileSize()) {
-        status = FinishCompactionOutputFile(compact, input);
-        if (!status.ok()) {
-          break;
+        // Close output file if it is big enough
+        if (compact->builder_hot->FileSize() >=
+            compact->compaction->MaxOutputFileSize()) {
+          status = FinishCompactionOutputFileHot(compact, input);
+          if (!status.ok()) {
+            break;
+          }
+        }
+
+        //should update keyupd_lru
+        if (keyupd_lru != nullptr) {
+          Slice user_k = ExtractUserKey(key);
+          keyupd_lru->CompareAndUpdateSst(user_k, cur_file_num, compact->current_output_hot()->number);
+        }
+      } else {
+        if(compact->builder == nullptr) {
+          status = OpenCompactionOutputFile(compact, false);
+          if (!status.ok()) {
+            break;
+          }
+        }
+        assert(!key.empty());
+        if (compact->builder->NumEntries() == 0) {
+          compact->current_output()->smallest.DecodeFrom(key);
+        }
+        compact->current_output()->largest.DecodeFrom(key);
+        compact->builder->Add(key, input->value());
+
+        // Close output file if it is big enough
+        if (compact->builder->FileSize() >=
+            compact->compaction->MaxOutputFileSize()) {
+          status = FinishCompactionOutputFile(compact, input);
+          if (!status.ok()) {
+            break;
+          }
+        }
+
+        //should update keyupd_lru
+        if (keyupd_lru != nullptr) {
+          Slice user_k = ExtractUserKey(key);
+          keyupd_lru->CompareAndUpdateSst(user_k, cur_file_num, compact->current_output()->number);
         }
       }
     }
@@ -1094,6 +1228,9 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
   }
   if (status.ok() && compact->builder != nullptr) {
     status = FinishCompactionOutputFile(compact, input);
+  }
+  if (status.ok() && compact->builder_hot != nullptr) {
+    status = FinishCompactionOutputFileHot(compact, input);
   }
   if (status.ok()) {
     status = input->status();
@@ -1117,6 +1254,9 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
   for (size_t i = 0; i < compact->outputs.size(); i++) {
     stats.bytes_written += compact->outputs[i].file_size;
   }
+  // for (size_t i = 0; i < compact->outputs_hot.size(); i++) {
+  //   stats.bytes_written += compact->outputs_hot[i].file_size;
+  // }
 
   mutex_.Lock();
   stats_[compact->compaction->level() + 1].Add(stats);
@@ -1132,168 +1272,168 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
   return status;
 }
 
-Status DBImpl::DoCompactionWork(CompactionState* compact) {
-  const uint64_t start_micros = env_->NowMicros();
-  int64_t imm_micros = 0;  // Micros spent doing imm_ compactions
+// Status DBImpl::DoCompactionWork(CompactionState* compact) {
+//   const uint64_t start_micros = env_->NowMicros();
+//   int64_t imm_micros = 0;  // Micros spent doing imm_ compactions
 
-  printf("warning, normal compaction should not be called!\n");
+//   printf("warning, normal compaction should not be called!\n");
 
-  Log(options_.info_log, "Compacting %d@%d + %d@%d files",
-      compact->compaction->num_input_files(0), compact->compaction->level(),
-      compact->compaction->num_input_files(1),
-      compact->compaction->level() + 1);
+//   Log(options_.info_log, "Compacting %d@%d + %d@%d files",
+//       compact->compaction->num_input_files(0), compact->compaction->level(),
+//       compact->compaction->num_input_files(1),
+//       compact->compaction->level() + 1);
 
-  assert(versions_->NumLevelFiles(compact->compaction->level()) > 0);
-  assert(compact->builder == nullptr);
-  assert(compact->outfile == nullptr);
-  if (snapshots_.empty()) {
-    compact->smallest_snapshot = versions_->LastSequence();
-  } else {
-    compact->smallest_snapshot = snapshots_.oldest()->sequence_number();
-  }
+//   assert(versions_->NumLevelFiles(compact->compaction->level()) > 0);
+//   assert(compact->builder == nullptr);
+//   assert(compact->outfile == nullptr);
+//   if (snapshots_.empty()) {
+//     compact->smallest_snapshot = versions_->LastSequence();
+//   } else {
+//     compact->smallest_snapshot = snapshots_.oldest()->sequence_number();
+//   }
 
-  Iterator* input = versions_->MakeInputIterator(compact->compaction);
+//   Iterator* input = versions_->MakeInputIterator(compact->compaction);
 
-  // Release mutex while we're actually doing the compaction work
-  mutex_.Unlock();
+//   // Release mutex while we're actually doing the compaction work
+//   mutex_.Unlock();
 
-  input->SeekToFirst();
-  Status status;
-  ParsedInternalKey ikey;
-  std::string current_user_key;
-  bool has_current_user_key = false;
-  SequenceNumber last_sequence_for_key = kMaxSequenceNumber;
-  while (input->Valid() && !shutting_down_.load(std::memory_order_acquire)) {
-    // Prioritize immutable compaction work
-    if (has_imm_.load(std::memory_order_relaxed)) {
-      const uint64_t imm_start = env_->NowMicros();
-      mutex_.Lock();
-      if (imm_ != nullptr) {
-        CompactMemTable();
-        // Wake up MakeRoomForWrite() if necessary.
-        background_work_finished_signal_.SignalAll();
-      }
-      mutex_.Unlock();
-      imm_micros += (env_->NowMicros() - imm_start);
-    }
+//   input->SeekToFirst();
+//   Status status;
+//   ParsedInternalKey ikey;
+//   std::string current_user_key;
+//   bool has_current_user_key = false;
+//   SequenceNumber last_sequence_for_key = kMaxSequenceNumber;
+//   while (input->Valid() && !shutting_down_.load(std::memory_order_acquire)) {
+//     // Prioritize immutable compaction work
+//     if (has_imm_.load(std::memory_order_relaxed)) {
+//       const uint64_t imm_start = env_->NowMicros();
+//       mutex_.Lock();
+//       if (imm_ != nullptr) {
+//         CompactMemTable();
+//         // Wake up MakeRoomForWrite() if necessary.
+//         background_work_finished_signal_.SignalAll();
+//       }
+//       mutex_.Unlock();
+//       imm_micros += (env_->NowMicros() - imm_start);
+//     }
 
-    Slice key = input->key();
-    if (compact->compaction->ShouldStopBefore(key) &&
-        compact->builder != nullptr) {
-      status = FinishCompactionOutputFile(compact, input);
-      if (!status.ok()) {
-        break;
-      }
-    }
+//     Slice key = input->key();
+//     if (compact->compaction->ShouldStopBefore(key) &&
+//         compact->builder != nullptr) {
+//       status = FinishCompactionOutputFile(compact, input);
+//       if (!status.ok()) {
+//         break;
+//       }
+//     }
 
-    // Handle key/value, add to state, etc.
-    bool drop = false;
-    if (!ParseInternalKey(key, &ikey)) {
-      // Do not hide error keys
-      current_user_key.clear();
-      has_current_user_key = false;
-      last_sequence_for_key = kMaxSequenceNumber;
-    } else {
-      if (!has_current_user_key ||
-          user_comparator()->Compare(ikey.user_key, Slice(current_user_key)) !=
-              0) {
-        // First occurrence of this user key
-        current_user_key.assign(ikey.user_key.data(), ikey.user_key.size());
-        has_current_user_key = true;
-        last_sequence_for_key = kMaxSequenceNumber;
-      }
+//     // Handle key/value, add to state, etc.
+//     bool drop = false;
+//     if (!ParseInternalKey(key, &ikey)) {
+//       // Do not hide error keys
+//       current_user_key.clear();
+//       has_current_user_key = false;
+//       last_sequence_for_key = kMaxSequenceNumber;
+//     } else {
+//       if (!has_current_user_key ||
+//           user_comparator()->Compare(ikey.user_key, Slice(current_user_key)) !=
+//               0) {
+//         // First occurrence of this user key
+//         current_user_key.assign(ikey.user_key.data(), ikey.user_key.size());
+//         has_current_user_key = true;
+//         last_sequence_for_key = kMaxSequenceNumber;
+//       }
 
-      if (last_sequence_for_key <= compact->smallest_snapshot) {
-        // Hidden by an newer entry for same user key
-        drop = true;  // (A)
-      } else if (ikey.type == kTypeDeletion &&
-                 ikey.sequence <= compact->smallest_snapshot &&
-                 compact->compaction->IsBaseLevelForKey(ikey.user_key)) {
-        // For this user key:
-        // (1) there is no data in higher levels
-        // (2) data in lower levels will have larger sequence numbers
-        // (3) data in layers that are being compacted here and have
-        //     smaller sequence numbers will be dropped in the next
-        //     few iterations of this loop (by rule (A) above).
-        // Therefore this deletion marker is obsolete and can be dropped.
-        drop = true;
-      }
+//       if (last_sequence_for_key <= compact->smallest_snapshot) {
+//         // Hidden by an newer entry for same user key
+//         drop = true;  // (A)
+//       } else if (ikey.type == kTypeDeletion &&
+//                  ikey.sequence <= compact->smallest_snapshot &&
+//                  compact->compaction->IsBaseLevelForKey(ikey.user_key)) {
+//         // For this user key:
+//         // (1) there is no data in higher levels
+//         // (2) data in lower levels will have larger sequence numbers
+//         // (3) data in layers that are being compacted here and have
+//         //     smaller sequence numbers will be dropped in the next
+//         //     few iterations of this loop (by rule (A) above).
+//         // Therefore this deletion marker is obsolete and can be dropped.
+//         drop = true;
+//       }
 
-      last_sequence_for_key = ikey.sequence;
-    }
-#if 0
-    Log(options_.info_log,
-        "  Compact: %s, seq %d, type: %d %d, drop: %d, is_base: %d, "
-        "%d smallest_snapshot: %d",
-        ikey.user_key.ToString().c_str(),
-        (int)ikey.sequence, ikey.type, kTypeValue, drop,
-        compact->compaction->IsBaseLevelForKey(ikey.user_key),
-        (int)last_sequence_for_key, (int)compact->smallest_snapshot);
-#endif
+//       last_sequence_for_key = ikey.sequence;
+//     }
+// #if 0
+//     Log(options_.info_log,
+//         "  Compact: %s, seq %d, type: %d %d, drop: %d, is_base: %d, "
+//         "%d smallest_snapshot: %d",
+//         ikey.user_key.ToString().c_str(),
+//         (int)ikey.sequence, ikey.type, kTypeValue, drop,
+//         compact->compaction->IsBaseLevelForKey(ikey.user_key),
+//         (int)last_sequence_for_key, (int)compact->smallest_snapshot);
+// #endif
 
-    if (!drop) {
-      // Open output file if necessary
-      if (compact->builder == nullptr) {
-        status = OpenCompactionOutputFile(compact);
-        if (!status.ok()) {
-          break;
-        }
-      }
-      if (compact->builder->NumEntries() == 0) {
-        compact->current_output()->smallest.DecodeFrom(key);
-      }
-      compact->current_output()->largest.DecodeFrom(key);
-      compact->builder->Add(key, input->value());
+//     if (!drop) {
+//       // Open output file if necessary
+//       if (compact->builder == nullptr) {
+//         status = OpenCompactionOutputFile(compact);
+//         if (!status.ok()) {
+//           break;
+//         }
+//       }
+//       if (compact->builder->NumEntries() == 0) {
+//         compact->current_output()->smallest.DecodeFrom(key);
+//       }
+//       compact->current_output()->largest.DecodeFrom(key);
+//       compact->builder->Add(key, input->value());
 
-      // Close output file if it is big enough
-      if (compact->builder->FileSize() >=
-          compact->compaction->MaxOutputFileSize()) {
-        status = FinishCompactionOutputFile(compact, input);
-        if (!status.ok()) {
-          break;
-        }
-      }
-    }
+//       // Close output file if it is big enough
+//       if (compact->builder->FileSize() >=
+//           compact->compaction->MaxOutputFileSize()) {
+//         status = FinishCompactionOutputFile(compact, input);
+//         if (!status.ok()) {
+//           break;
+//         }
+//       }
+//     }
 
-    input->Next();
-  }
+//     input->Next();
+//   }
 
-  if (status.ok() && shutting_down_.load(std::memory_order_acquire)) {
-    status = Status::IOError("Deleting DB during compaction");
-  }
-  if (status.ok() && compact->builder != nullptr) {
-    status = FinishCompactionOutputFile(compact, input);
-  }
-  if (status.ok()) {
-    status = input->status();
-  }
-  delete input;
-  input = nullptr;
+//   if (status.ok() && shutting_down_.load(std::memory_order_acquire)) {
+//     status = Status::IOError("Deleting DB during compaction");
+//   }
+//   if (status.ok() && compact->builder != nullptr) {
+//     status = FinishCompactionOutputFile(compact, input);
+//   }
+//   if (status.ok()) {
+//     status = input->status();
+//   }
+//   delete input;
+//   input = nullptr;
 
-  CompactionStats stats;
-  stats.micros = env_->NowMicros() - start_micros - imm_micros;
-  for (int which = 0; which < 2; which++) {
-    for (int i = 0; i < compact->compaction->num_input_files(which); i++) {
-      stats.bytes_read += compact->compaction->input(which, i)->file_size;
-    }
-  }
-  for (size_t i = 0; i < compact->outputs.size(); i++) {
-    stats.bytes_written += compact->outputs[i].file_size;
-  }
+//   CompactionStats stats;
+//   stats.micros = env_->NowMicros() - start_micros - imm_micros;
+//   for (int which = 0; which < 2; which++) {
+//     for (int i = 0; i < compact->compaction->num_input_files(which); i++) {
+//       stats.bytes_read += compact->compaction->input(which, i)->file_size;
+//     }
+//   }
+//   for (size_t i = 0; i < compact->outputs.size(); i++) {
+//     stats.bytes_written += compact->outputs[i].file_size;
+//   }
 
-  mutex_.Lock();
-  stats_[compact->compaction->level() + 1].Add(stats);
+//   mutex_.Lock();
+//   stats_[compact->compaction->level() + 1].Add(stats);
 
-  if (status.ok()) {
-    status = InstallCompactionResults(compact);
-  }
-  if (!status.ok()) {
-    RecordBackgroundError(status);
-  }
-  VersionSet::LevelSummaryStorage tmp;
-  Log(options_.info_log, "compacted to: %s", versions_->LevelSummary(&tmp));
-  return status;
-}
+//   if (status.ok()) {
+//     status = InstallCompactionResults(compact);
+//   }
+//   if (!status.ok()) {
+//     RecordBackgroundError(status);
+//   }
+//   VersionSet::LevelSummaryStorage tmp;
+//   Log(options_.info_log, "compacted to: %s", versions_->LevelSummary(&tmp));
+//   return status;
+// }
 
 namespace {
 
@@ -1386,10 +1526,19 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
     LookupKey lkey(key, snapshot);
     if (mem->Get(lkey, value, &s)) {
       // Done
+      if(cbf != nullptr){
+        cbf->AddKey(key);
+      }
     } else if (imm != nullptr && imm->Get(lkey, value, &s)) {
       // Done
+      if(cbf != nullptr){
+        cbf->AddKey(key);
+      }
     } else {
       s = current->Get(options, lkey, value, &stats);
+      if(s.ok() && cbf != nullptr){
+        cbf->AddKey(key);
+      }
       have_stat_update = true;
     }
     mutex_.Lock();
@@ -1747,6 +1896,12 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
       impl->log_ = new log::Writer(lfile);
       impl->mem_ = new MemTable(impl->internal_comparator_);
       impl->mem_->Ref();
+      if(options.CBF_ON){
+        if(impl->cbf == nullptr){
+          impl->cbf = new CountingBloomFilter(4);
+        }
+        impl->cbf->InitCBF();
+      }
     }
 
   }

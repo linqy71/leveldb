@@ -124,6 +124,9 @@ static int FLAGS_key_size = 64;
 // benchmark will fail.
 static bool FLAGS_use_existing_db = false;
 
+static bool FLAGS_CBF_ON = false;
+static bool FLAGS_UPD_ON = false;
+
 // If true, reuse existing log/MANIFEST files when re-opening a database.
 static bool FLAGS_reuse_logs = false;
 
@@ -803,6 +806,8 @@ class Benchmark {
     options.write_buffer_size = FLAGS_write_buffer_size;
     options.max_file_size = FLAGS_max_file_size;
     options.block_size = FLAGS_block_size;
+    options.CBF_ON = FLAGS_CBF_ON;
+    options.UPD_ON = FLAGS_UPD_ON;
     if (FLAGS_comparisons) {
       options.comparator = &count_comparator_;
     }
@@ -1358,6 +1363,12 @@ int main(int argc, char** argv) {
     } else if (sscanf(argv[i], "--use_existing_db=%d%c", &n, &junk) == 1 &&
                (n == 0 || n == 1)) {
       FLAGS_use_existing_db = n;
+    } else if (sscanf(argv[i], "--cbf_on=%d%c", &n, &junk) == 1 && 
+               (n == 0 || n == 1)) {
+      FLAGS_CBF_ON = n;
+    } else if (sscanf(argv[i], "--upd_on=%d%c", &n, &junk) == 1 && 
+               (n == 0 || n == 1)) {
+      FLAGS_UPD_ON = n;
     } else if (sscanf(argv[i], "--reuse_logs=%d%c", &n, &junk) == 1 &&
                (n == 0 || n == 1)) {
       FLAGS_reuse_logs = n;

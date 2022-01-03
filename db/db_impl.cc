@@ -155,6 +155,7 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       keyupd_lru(nullptr),
       score_tbl(nullptr),
       cbf(nullptr),
+      instance(nullptr),
       tmp_batch_(new WriteBatch),
       background_compaction_scheduled_(false),
       manual_compaction_(nullptr),
@@ -185,6 +186,8 @@ DBImpl::~DBImpl() {
   delete keyupd_lru;
   delete score_tbl;
   delete cbf;
+  if(instance != nullptr)
+    delete instance;
 
   if (owns_info_log_) {
     delete options_.info_log;
@@ -542,8 +545,11 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
   Status s;
   {
     mutex_.Unlock();
+    assert(instance != nullptr);
+    instance->StartTimer(MyStat::TASK_FLUSH);
     s = BuildL0TableAndSaveToMap(dbname_, env_, options_, table_cache_, iter, 
                     &meta, keyupd_lru, score_tbl);
+    instance->PauseTimer(MyStat::TASK_FLUSH, true);
     mutex_.Lock();
   }
 
@@ -1035,6 +1041,7 @@ Status DBImpl::InstallCompactionResults(CompactionState* compact) {
 }
 
 Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
+  instance->StartTimer(MyStat::TASK_COMPACTION);
   const uint64_t start_micros = env_->NowMicros();
   int64_t imm_micros = 0;  // Micros spent doing imm_ compactions
 
@@ -1269,6 +1276,7 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
   }
   VersionSet::LevelSummaryStorage tmp;
   Log(options_.info_log, "compacted to: %s", versions_->LevelSummary(&tmp));
+  instance->PauseTimer(MyStat::TASK_COMPACTION, true);
   return status;
 }
 
@@ -1499,6 +1507,7 @@ int64_t DBImpl::TEST_MaxNextLevelOverlappingBytes() {
 
 Status DBImpl::Get(const ReadOptions& options, const Slice& key,
                    std::string* value) {
+  instance->StartTimer(MyStat::TASK_GET);
   Status s;
   MutexLock l(&mutex_);
   SequenceNumber snapshot;
@@ -1527,17 +1536,23 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
     if (mem->Get(lkey, value, &s)) {
       // Done
       if(cbf != nullptr){
+        instance->StartTimer(MyStat::TASK_CBF);
         cbf->AddKey(key);
+        instance->PauseTimer(MyStat::TASK_CBF, true);
       }
     } else if (imm != nullptr && imm->Get(lkey, value, &s)) {
       // Done
       if(cbf != nullptr){
+        instance->StartTimer(MyStat::TASK_CBF);
         cbf->AddKey(key);
+        instance->PauseTimer(MyStat::TASK_CBF, true);
       }
     } else {
       s = current->Get(options, lkey, value, &stats);
       if(s.ok() && cbf != nullptr){
+        instance->StartTimer(MyStat::TASK_CBF);
         cbf->AddKey(key);
+        instance->PauseTimer(MyStat::TASK_CBF, true);
       }
       have_stat_update = true;
     }
@@ -1550,6 +1565,7 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
   mem->Unref();
   if (imm != nullptr) imm->Unref();
   current->Unref();
+  instance->PauseTimer(MyStat::TASK_GET, true);
   return s;
 }
 
@@ -1592,6 +1608,7 @@ Status DBImpl::Delete(const WriteOptions& options, const Slice& key) {
 }
 
 Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
+  instance->StartTimer(MyStat::TASK_WRITE);
   Writer w(&mutex_);
   w.batch = updates;
   w.sync = options.sync;
@@ -1660,7 +1677,7 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
   if (!writers_.empty()) {
     writers_.front()->cv.Signal();
   }
-
+  instance->PauseTimer(MyStat::TASK_WRITE, true);
   return status;
 }
 
@@ -1902,6 +1919,7 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
         }
         impl->cbf->InitCBF();
       }
+      impl->instance = new MyStat::Stats();
     }
 
   }

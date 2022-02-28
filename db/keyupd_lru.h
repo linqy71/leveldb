@@ -63,7 +63,7 @@ namespace leveldb {
 			return successful;
 		}
 
-		bool FindSst(Slice& key, uint64_t* value) {
+		bool FindSst(const Slice& key, uint64_t* value) {
 
 			Cache::Handle* handle = sstid_cache_->Lookup(key);
 			if (handle != nullptr) { //find key

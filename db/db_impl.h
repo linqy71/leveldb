@@ -143,9 +143,11 @@ class DBImpl : public DB {
   void RecordBackgroundError(const Status& s);
 
   void MaybeScheduleCompaction() EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  void MaybeScheduleFileCompaction() EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   static void BGWork(void* db);
-  void BackgroundCall();
-  void BackgroundCompaction() EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  static void BGFileWork(void* db);
+  void BackgroundCall(bool byfile);
+  void BackgroundCompaction(bool byfile) EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   void CleanupCompaction(CompactionState* compact)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   Status DoActiveCompactionWork(CompactionState* compact)
@@ -207,6 +209,8 @@ class DBImpl : public DB {
 
   // Has a background compaction been scheduled or is running?
   bool background_compaction_scheduled_ GUARDED_BY(mutex_);
+  // Has a active compaction been scheduled or is running?
+  bool active_compaction_scheduled_ GUARDED_BY(mutex_);
 
   ManualCompaction* manual_compaction_ GUARDED_BY(mutex_);
 

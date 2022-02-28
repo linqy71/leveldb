@@ -126,6 +126,7 @@ static bool FLAGS_use_existing_db = false;
 
 static bool FLAGS_CBF_ON = false;
 static bool FLAGS_UPD_ON = false;
+static int FLAGS_score_threshold = 1000;
 
 // If true, reuse existing log/MANIFEST files when re-opening a database.
 static bool FLAGS_reuse_logs = false;
@@ -808,6 +809,7 @@ class Benchmark {
     options.block_size = FLAGS_block_size;
     options.CBF_ON = FLAGS_CBF_ON;
     options.UPD_ON = FLAGS_UPD_ON;
+    options.score_threshold = FLAGS_score_threshold;
     if (FLAGS_comparisons) {
       options.comparator = &count_comparator_;
     }
@@ -1149,6 +1151,7 @@ class Benchmark {
   }
 
   void ReadRandom(ThreadState* thread) {
+    system("sudo bash -c \"echo 1 > /proc/sys/vm/drop_caches\"");
     ReadOptions options;
     std::string value;
     int found = 0;

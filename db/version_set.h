@@ -16,6 +16,7 @@
 #define STORAGE_LEVELDB_DB_VERSION_SET_H_
 
 #include <map>
+#include <unordered_map>
 #include <set>
 #include <vector>
 
@@ -76,6 +77,8 @@ class Version {
 
   Status Get(const ReadOptions&, const LookupKey& key, std::string* val,
              GetStats* stats);
+  Status GetByFile(const ReadOptions&, const LookupKey& key, std::string* val,
+             GetStats* stats, uint64_t& file_num);
 
   // Adds "stats" into the current state.  Returns true if a new
   // compaction may need to be triggered, false otherwise.
@@ -147,6 +150,9 @@ class Version {
   void ForEachOverlapping(Slice user_key, Slice internal_key, void* arg,
                           bool (*func)(void*, int, FileMetaData*));
 
+  void ForFile(Slice user_key, uint64_t& file_num, void* arg,
+                          bool (*func)(void*, int, FileMetaData*));
+
   VersionSet* vset_;  // VersionSet to which this Version belongs
   Version* next_;     // Next version in linked list
   Version* prev_;     // Previous version in linked list
@@ -154,6 +160,7 @@ class Version {
 
   // List of files per level
   std::vector<FileMetaData*> files_[config::kNumLevels];
+  std::unordered_map<uint64_t, int> file_to_level;
 
   // Next file to compact based on seek stats.
   FileMetaData* file_to_compact_;

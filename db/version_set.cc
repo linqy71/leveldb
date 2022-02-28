@@ -323,6 +323,30 @@ void Version::ForEachOverlapping(Slice user_key, Slice internal_key, void* arg,
   }
 }
 
+void Version::ForFile(Slice user_key, uint64_t& file_num, void* arg,
+                                 bool (*func)(void*, int, FileMetaData*)) {
+  const Comparator* ucmp = vset_->icmp_.user_comparator();
+
+  auto it = file_to_level.find(file_num);
+  if(it == file_to_level.end()) return;
+  int target_level = it->second;
+  assert(target_level < config::kNumLevels);
+
+  FileMetaData* target = nullptr;
+  for (uint32_t i = 0; i < files_[target_level].size(); i++) {
+    FileMetaData* f = files_[target_level][i];
+    if (f->number == file_num) {
+      target = f;
+    }
+  }
+  if (target != nullptr) {
+    if (!(*func)(arg, target_level, target)) {
+      return;
+    }
+  }
+
+}
+
 Status Version::Get(const ReadOptions& options, const LookupKey& k,
                     std::string* value, GetStats* stats) {
   stats->seek_file = nullptr;
@@ -397,6 +421,84 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
   state.saver.value = value;
 
   ForEachOverlapping(state.saver.user_key, state.ikey, &state, &State::Match);
+
+  return state.found ? state.s : Status::NotFound(Slice());
+}
+
+Status Version::GetByFile(const ReadOptions& options, const LookupKey& k,
+                    std::string* value, GetStats* stats, uint64_t& file_num) {
+  stats->seek_file = nullptr;
+  stats->seek_file_level = -1;
+
+  struct State {
+    Saver saver;
+    GetStats* stats;
+    const ReadOptions* options;
+    Slice ikey;
+    FileMetaData* last_file_read;
+    int last_file_read_level;
+
+    VersionSet* vset;
+    Status s;
+    bool found;
+
+    static bool Match(void* arg, int level, FileMetaData* f) {
+      State* state = reinterpret_cast<State*>(arg);
+
+      if (state->stats->seek_file == nullptr &&
+          state->last_file_read != nullptr) {
+        // We have had more than one seek for this read.  Charge the 1st file.
+        state->stats->seek_file = state->last_file_read;
+        state->stats->seek_file_level = state->last_file_read_level;
+      }
+
+      state->last_file_read = f;
+      state->last_file_read_level = level;
+
+      state->s = state->vset->table_cache_->Get(*state->options, f->number,
+                                                f->file_size, state->ikey,
+                                                &state->saver, SaveValue);
+      if (!state->s.ok()) {
+        state->found = true;
+        return false;
+      }
+      switch (state->saver.state) {
+        case kNotFound:
+          return true;  // Keep searching in other files
+        case kFound:
+          state->found = true;
+          return false;
+        case kDeleted:
+          return false;
+        case kCorrupt:
+          state->s =
+              Status::Corruption("corrupted key for ", state->saver.user_key);
+          state->found = true;
+          return false;
+      }
+
+      // Not reached. Added to avoid false compilation warnings of
+      // "control reaches end of non-void function".
+      return false;
+    }
+  };
+
+  State state;
+  state.found = false;
+  state.stats = stats;
+  state.last_file_read = nullptr;
+  state.last_file_read_level = -1;
+
+  state.options = &options;
+  state.ikey = k.internal_key();
+  state.vset = vset_;
+
+  state.saver.state = kNotFound;
+  state.saver.ucmp = vset_->icmp_.user_comparator();
+  state.saver.user_key = k.user_key();
+  state.saver.value = value;
+
+  ForFile(state.saver.user_key, file_num, &state, &State::Match);
 
   return state.found ? state.s : Status::NotFound(Slice());
 }
@@ -728,6 +830,7 @@ class VersionSet::Builder {
       }
       f->refs++;
       files->push_back(f);
+      v->file_to_level.insert(std::make_pair(f->number, level));
     }
   }
 };
@@ -1343,16 +1446,17 @@ Compaction* VersionSet::PickCompaction() {
 
 Compaction* VersionSet::PickCompactionByFile(uint64_t target_num) {
   Compaction* c = nullptr;
-  int level;
+  
+  auto it = current_->file_to_level.find(target_num);
+  assert(it != current_->file_to_level.end() && it->second < config::kNumLevels);
 
-  for (size_t l = 0; l < config::kNumLevels - 1; l++) {
-    for (size_t i = 0; i < current_->files_[l].size(); i++) {
-      FileMetaData* f = current_->files_[l][i];
-      if (f->number == target_num) {
-        level = l;
-        c = new Compaction(options_, level);
-        c->inputs_[0].push_back(f);
-      }
+  int level = it->second;
+
+  for (size_t i = 0; i < current_->files_[level].size(); i++) {
+    FileMetaData* f = current_->files_[level][i];
+    if (f->number == target_num) {
+      c = new Compaction(options_, level);
+      c->inputs_[0].push_back(f);
     }
   }
 
@@ -1372,7 +1476,10 @@ Compaction* VersionSet::PickCompactionByFile(uint64_t target_num) {
     assert(!c->inputs_[0].empty());
   }
 
-  SetupOtherInputs(c);
+  if (level != config::kNumLevels - 1) {
+    SetupOtherInputs(c);
+  }
+  
 
   return c;
 }

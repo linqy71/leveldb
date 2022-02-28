@@ -89,6 +89,8 @@ struct LEVELDB_EXPORT Options {
   bool CBF_ON = false;
 
   bool UPD_ON = false;
+  int score_threshold = 5000;
+  int upd_table_size = 128; // MB
 
   // Control over blocks (user data is stored in a set of blocks, and
   // a block is the unit of reading from disk).

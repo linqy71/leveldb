@@ -158,6 +158,7 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       instance(nullptr),
       tmp_batch_(new WriteBatch),
       background_compaction_scheduled_(false),
+      active_compaction_scheduled_(false),
       manual_compaction_(nullptr),
       versions_(new VersionSet(dbname_, &options_, table_cache_,
                                &internal_comparator_)) {}
@@ -166,7 +167,7 @@ DBImpl::~DBImpl() {
   // Wait for background work to finish.
   mutex_.Lock();
   shutting_down_.store(true, std::memory_order_release);
-  while (background_compaction_scheduled_) {
+  while (background_compaction_scheduled_ || active_compaction_scheduled_) {
     background_work_finished_signal_.Wait();
   }
   mutex_.Unlock();
@@ -536,7 +537,7 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
   
   // create a keyupd_lru and a score table
   if (keyupd_lru == nullptr && options_.UPD_ON) {  
-    keyupd_lru = new KeyUpdLru(64 << 20);
+    keyupd_lru = new KeyUpdLru(options_.upd_table_size << 20);
   }
   if(score_tbl == nullptr && options_.UPD_ON) {
     score_tbl = new ScoreTable();
@@ -545,11 +546,11 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
   Status s;
   {
     mutex_.Unlock();
-    assert(instance != nullptr);
-    instance->StartTimer(MyStat::TASK_FLUSH);
+    // assert(instance != nullptr);
+    // instance->StartTimer(MyStat::TASK_FLUSH);
     s = BuildL0TableAndSaveToMap(dbname_, env_, options_, table_cache_, iter, 
                     &meta, keyupd_lru, score_tbl);
-    instance->PauseTimer(MyStat::TASK_FLUSH, true);
+    // instance->PauseTimer(MyStat::TASK_FLUSH, true);
     mutex_.Lock();
   }
 
@@ -572,8 +573,8 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
                   meta.largest);
   }
 
-  if (score_tbl != nullptr) {
-    MaybeScheduleCompaction();
+  if (score_tbl != nullptr && score_tbl->GetHighScoreSst().score > options_.score_threshold) {
+    MaybeScheduleFileCompaction();
   }
 
   CompactionStats stats;
@@ -707,63 +708,71 @@ void DBImpl::MaybeScheduleCompaction() {
   } else if (imm_ == nullptr && manual_compaction_ == nullptr &&
              !versions_->NeedsCompaction()) {
     // No work to be done
-  } else if (score_tbl != nullptr && score_tbl->GetHighScoreSst().score > 1000) {
-    background_compaction_scheduled_ = true;
-    env_->Schedule(&DBImpl::BGWork, this);
   } else {
     background_compaction_scheduled_ = true;
     env_->Schedule(&DBImpl::BGWork, this);
   }
 }
 
-// void DBImpl::MaybeActiveScheduleCompaction() {
-//   mutex_.AssertHeld();
-//   if (background_compaction_scheduled_) {
-//     // Already scheduled
-//   } else if (shutting_down_.load(std::memory_order_acquire)) {
-//     // DB is being deleted; no more background compactions
-//   } else if (!bg_error_.ok()) {
-//     // Already got an error; no more changes
-//   } else if (imm_ == nullptr && manual_compaction_ == nullptr &&
-//              !versions_->NeedsCompaction()) {
-//     // No work to be done
-//   } else {
-//     background_compaction_scheduled_ = true;
-//     env_->Schedule(&DBImpl::BGWork, this);
-//   }
-// }
-
-void DBImpl::BGWork(void* db) {
-  reinterpret_cast<DBImpl*>(db)->BackgroundCall();
+void DBImpl::MaybeScheduleFileCompaction() {
+  mutex_.AssertHeld();
+  if (active_compaction_scheduled_) {
+    // Already scheduled
+  } else if (shutting_down_.load(std::memory_order_acquire)) {
+    // DB is being deleted; no more background compactions
+  } else if (!bg_error_.ok()) {
+    // Already got an error; no more changes
+  } else if (imm_ == nullptr && manual_compaction_ == nullptr &&
+             !versions_->NeedsCompaction()) {
+    // No work to be done
+  } else if (score_tbl != nullptr && score_tbl->GetHighScoreSst().score > options_.score_threshold) { // threshold to be detemined
+    // printf("active trigered, score: %d \n", score_tbl->GetHighScoreSst().score);
+    active_compaction_scheduled_ = true;
+    env_->Schedule(&DBImpl::BGFileWork, this);
+  }
 }
 
-void DBImpl::BackgroundCall() {
+
+
+void DBImpl::BGWork(void* db) {
+  reinterpret_cast<DBImpl*>(db)->BackgroundCall(false);
+}
+
+void DBImpl::BGFileWork(void* db) {
+  reinterpret_cast<DBImpl*>(db)->BackgroundCall(true);
+}
+
+void DBImpl::BackgroundCall(bool byfile) {
   MutexLock l(&mutex_);
-  assert(background_compaction_scheduled_);
+  assert(background_compaction_scheduled_ || active_compaction_scheduled_);
   if (shutting_down_.load(std::memory_order_acquire)) {
     // No more background work when shutting down.
   } else if (!bg_error_.ok()) {
     // No more background work after a background error.
   } else {
-    BackgroundCompaction();
+    BackgroundCompaction(byfile);
   }
 
-  background_compaction_scheduled_ = false;
+  if (byfile) {
+    active_compaction_scheduled_ = false;
+  } else {
+    background_compaction_scheduled_ = false;
+  }
 
   // Previous compaction may have produced too many files in a level,
   // so reschedule another compaction if needed.
   MaybeScheduleCompaction();
+  MaybeScheduleFileCompaction();
   background_work_finished_signal_.SignalAll();
 }
 
-void DBImpl::BackgroundCompaction() {
+void DBImpl::BackgroundCompaction(bool byfile) {
   mutex_.AssertHeld();
 
   if (imm_ != nullptr) {
     CompactMemTable();
     return;
   }
-
   Compaction* c = nullptr;
   bool is_manual = (manual_compaction_ != nullptr);
   InternalKey manual_end;
@@ -780,16 +789,12 @@ void DBImpl::BackgroundCompaction() {
         (m->end ? m->end->DebugString().c_str() : "(end)"),
         (m->done ? "(end)" : manual_end.DebugString().c_str()));
   } else {
-    if (score_tbl != nullptr) {
+    if (byfile) {
       ScoreSst target = score_tbl->GetHighScoreSst();
-      if(target.score > 3000) {
-        uint64_t target_file = target.sst_id;
-        c = versions_->PickCompactionByFile(target_file);
-      }
-    }
-    if (c == nullptr) {
+      c = versions_->PickCompactionByFile(target.sst_id);
+    } else {
       c = versions_->PickCompaction();
-    } 
+    }
   }
 
   Status status;
@@ -799,25 +804,40 @@ void DBImpl::BackgroundCompaction() {
     // Move file to next level
     assert(c->num_input_files(0) == 1);
     FileMetaData* f = c->input(0, 0);
-    c->edit()->RemoveFile(c->level(), f->number);
-    c->edit()->AddFile(c->level() + 1, f->number, f->file_size, f->smallest,
-                       f->largest);
+    if (!byfile) {
+      c->edit()->RemoveFile(c->level(), f->number);
+      c->edit()->AddFile(c->level() + 1, f->number, f->file_size, f->smallest,
+                        f->largest);
+      status = versions_->LogAndApply(c->edit(), &mutex_);
+      if (!status.ok()) {
+        RecordBackgroundError(status);
+      }
+      VersionSet::LevelSummaryStorage tmp;
+      Log(options_.info_log, "Moved #%lld to level-%d %lld bytes %s: %s\n",
+          static_cast<unsigned long long>(f->number), c->level() + 1,
+          static_cast<unsigned long long>(f->file_size),
+          status.ToString().c_str(), versions_->LevelSummary(&tmp));
+    } else {
+      if(c->level() != config::kNumLevels - 1) {
+        CompactionState* compact = new CompactionState(c);
+        status = DoActiveCompactionWork(compact);
+        if (!status.ok()) {
+          RecordBackgroundError(status);
+        }
+        CleanupCompaction(compact);
+        c->ReleaseInputs();
+        RemoveObsoleteFiles();
+      }
+    }
     // is trivial move but has large score
     // means that old data contains in the single file
-    // delete score is ok
+    // do not move file but delete score
     if (score_tbl != nullptr) {
       score_tbl->RemoveSstScore(f->number);
+      score_tbl->ResetHighest();
       assert(!score_tbl->Find(f->number));
     }
-    status = versions_->LogAndApply(c->edit(), &mutex_);
-    if (!status.ok()) {
-      RecordBackgroundError(status);
-    }
-    VersionSet::LevelSummaryStorage tmp;
-    Log(options_.info_log, "Moved #%lld to level-%d %lld bytes %s: %s\n",
-        static_cast<unsigned long long>(f->number), c->level() + 1,
-        static_cast<unsigned long long>(f->file_size),
-        status.ToString().c_str(), versions_->LevelSummary(&tmp));
+    
   } else {
     CompactionState* compact = new CompactionState(c);
     status = DoActiveCompactionWork(compact);
@@ -899,6 +919,7 @@ Status DBImpl::OpenCompactionOutputFile(CompactionState* compact, bool hot) {
     out.smallest.Clear();
     out.largest.Clear();
     if(hot){
+      // out.hot_rank = hot_rank;
       compact->outputs_hot.push_back(out);
     } else {
       compact->outputs.push_back(out);
@@ -1027,11 +1048,13 @@ Status DBImpl::InstallCompactionResults(CompactionState* compact) {
   // Add compaction outputs
   compact->compaction->AddInputDeletions(compact->compaction->edit());
   const int level = compact->compaction->level();
-  for (size_t i = 0; i < compact->outputs_hot.size(); i++) {
-    const CompactionState::Output& out = compact->outputs_hot[i];
-    compact->compaction->edit()->AddFile(level, out.number, out.file_size,
-                                         out.smallest, out.largest);
-  }
+  // for (size_t i = 0; i < compact->outputs_hot.size(); i++) {
+  //   const CompactionState::Output& out = compact->outputs_hot[i];
+  //   // int t_level = level - out.hot_rank >= 0 ? (level - out.hot_rank) : 0;
+  //   compact->compaction->edit()->AddFile(0, out.number, out.file_size,
+  //                                        out.smallest, out.largest);
+  //   // printf("add file %d to level 0 \n", out.number);
+  // }
   for (size_t i = 0; i < compact->outputs.size(); i++) {
     const CompactionState::Output& out = compact->outputs[i];
     compact->compaction->edit()->AddFile(level + 1, out.number, out.file_size,
@@ -1041,7 +1064,7 @@ Status DBImpl::InstallCompactionResults(CompactionState* compact) {
 }
 
 Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
-  instance->StartTimer(MyStat::TASK_COMPACTION);
+  // instance->StartTimer(MyStat::TASK_COMPACTION);
   const uint64_t start_micros = env_->NowMicros();
   int64_t imm_micros = 0;  // Micros spent doing imm_ compactions
 
@@ -1157,75 +1180,106 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
 
     if (!drop) {
 
-      bool hot = false;
-      if (cbf != nullptr && cbf->KeyCounter(ikey.user_key) >= 8) { // the threshold is to be determined
-        if(user_comparator()->Compare(key, input_level_smallest) >= 0 &&
-          user_comparator()->Compare(key, input_level_largest) <= 0) {
-          //when compact from level to level+1
-          //hot key must be larger than input_level_smallest and smaller than input_level_largest
-          hot = true;
+      if(compact->builder == nullptr) {
+        status = OpenCompactionOutputFile(compact, false);
+        if (!status.ok()) {
+          break;
         }
       }
+      assert(!key.empty());
+      if (compact->builder->NumEntries() == 0) {
+        compact->current_output()->smallest.DecodeFrom(key);
+      }
+      compact->current_output()->largest.DecodeFrom(key);
+      compact->builder->Add(key, input->value());
+
+      // Close output file if it is big enough
+      if (compact->builder->FileSize() >=
+          compact->compaction->MaxOutputFileSize()) {
+        status = FinishCompactionOutputFile(compact, input);
+        if (!status.ok()) {
+          break;
+        }
+      }
+
+      //should update keyupd_lru
+      if (keyupd_lru != nullptr) {
+        Slice user_k = ExtractUserKey(key);
+        keyupd_lru->CompareAndUpdateSst(user_k, cur_file_num, compact->current_output()->number);
+      }
+
+      // bool hot = false;
+      // if (cbf != nullptr && cbf->KeyCounter(ikey.user_key) >= 15) { // the threshold is to be determined
+      //   hot = true;
+      //   // if(user_comparator()->Compare(key, input_level_smallest) >= 0 &&
+      //   //   user_comparator()->Compare(key, input_level_largest) <= 0) {
+      //   //   //when compact from level to level+1
+      //   //   //hot key must be larger than input_level_smallest and smaller than input_level_largest
+      //   //   hot = true;
+      //   // }
+      // }
 
       // Open output file if necessary
-      if (hot) {
-        if(compact->builder_hot == nullptr) {
-          status = OpenCompactionOutputFile(compact, true);
-          if (!status.ok()) {
-            break;
-          }
-        }
-        assert(compact->builder_hot != nullptr);
-        if (compact->builder_hot->NumEntries() == 0) {
-          compact->current_output_hot()->smallest.DecodeFrom(key);
-        }
-        compact->current_output_hot()->largest.DecodeFrom(key);
-        compact->builder_hot->Add(key, input->value());
+    //   if (hot) {
+    //     if(compact->builder_hot == nullptr) {
+    //       status = OpenCompactionOutputFile(compact, true);
+    //       if (!status.ok()) {
+    //         break;
+    //       }
+    //     }
+    //     assert(compact->builder_hot != nullptr);
+    //     if (compact->builder_hot->NumEntries() == 0) {
+    //       compact->current_output_hot()->smallest.DecodeFrom(key);
+    //     }
+    //     compact->current_output_hot()->largest.DecodeFrom(key);
+    //     compact->builder_hot->Add(key, input->value());
 
-        // Close output file if it is big enough
-        if (compact->builder_hot->FileSize() >=
-            compact->compaction->MaxOutputFileSize()) {
-          status = FinishCompactionOutputFileHot(compact, input);
-          if (!status.ok()) {
-            break;
-          }
-        }
+    //     // Close output file if it is big enough
+    //     if (compact->builder_hot->FileSize() >=
+    //         compact->compaction->MaxOutputFileSize()) {
+    //       status = FinishCompactionOutputFileHot(compact, input);
+    //       if (!status.ok()) {
+    //         break;
+    //       }
+    //     }
 
-        //should update keyupd_lru
-        if (keyupd_lru != nullptr) {
-          Slice user_k = ExtractUserKey(key);
-          keyupd_lru->CompareAndUpdateSst(user_k, cur_file_num, compact->current_output_hot()->number);
-        }
-      } else {
-        if(compact->builder == nullptr) {
-          status = OpenCompactionOutputFile(compact, false);
-          if (!status.ok()) {
-            break;
-          }
-        }
-        assert(!key.empty());
-        if (compact->builder->NumEntries() == 0) {
-          compact->current_output()->smallest.DecodeFrom(key);
-        }
-        compact->current_output()->largest.DecodeFrom(key);
-        compact->builder->Add(key, input->value());
+    //     //should update keyupd_lru
+    //     if (keyupd_lru != nullptr) {
+    //       Slice user_k = ExtractUserKey(key);
+    //       keyupd_lru->CompareAndUpdateSst(user_k, cur_file_num, compact->current_output_hot()->number);
+    //     }
+    //   } else {
+    //     if(compact->builder == nullptr) {
+    //       status = OpenCompactionOutputFile(compact, false);
+    //       if (!status.ok()) {
+    //         break;
+    //       }
+    //     }
+    //     assert(!key.empty());
+    //     if (compact->builder->NumEntries() == 0) {
+    //       compact->current_output()->smallest.DecodeFrom(key);
+    //     }
+    //     compact->current_output()->largest.DecodeFrom(key);
+    //     compact->builder->Add(key, input->value());
 
-        // Close output file if it is big enough
-        if (compact->builder->FileSize() >=
-            compact->compaction->MaxOutputFileSize()) {
-          status = FinishCompactionOutputFile(compact, input);
-          if (!status.ok()) {
-            break;
-          }
-        }
+    //     // Close output file if it is big enough
+    //     if (compact->builder->FileSize() >=
+    //         compact->compaction->MaxOutputFileSize()) {
+    //       status = FinishCompactionOutputFile(compact, input);
+    //       if (!status.ok()) {
+    //         break;
+    //       }
+    //     }
 
-        //should update keyupd_lru
-        if (keyupd_lru != nullptr) {
-          Slice user_k = ExtractUserKey(key);
-          keyupd_lru->CompareAndUpdateSst(user_k, cur_file_num, compact->current_output()->number);
-        }
-      }
+    //     //should update keyupd_lru
+    //     if (keyupd_lru != nullptr) {
+    //       Slice user_k = ExtractUserKey(key);
+    //       keyupd_lru->CompareAndUpdateSst(user_k, cur_file_num, compact->current_output()->number);
+    //     }
+    //   }
     }
+
+    
 
     input->Next();
   }
@@ -1236,9 +1290,9 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
   if (status.ok() && compact->builder != nullptr) {
     status = FinishCompactionOutputFile(compact, input);
   }
-  if (status.ok() && compact->builder_hot != nullptr) {
-    status = FinishCompactionOutputFileHot(compact, input);
-  }
+  // if (status.ok() && compact->builder_hot != nullptr) {
+  //   status = FinishCompactionOutputFileHot(compact, input);
+  // }
   if (status.ok()) {
     status = input->status();
   }
@@ -1258,6 +1312,9 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
       }
     }
   }
+  if(score_tbl != nullptr) {
+    score_tbl->ResetHighest();
+  }
   for (size_t i = 0; i < compact->outputs.size(); i++) {
     stats.bytes_written += compact->outputs[i].file_size;
   }
@@ -1276,7 +1333,7 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
   }
   VersionSet::LevelSummaryStorage tmp;
   Log(options_.info_log, "compacted to: %s", versions_->LevelSummary(&tmp));
-  instance->PauseTimer(MyStat::TASK_COMPACTION, true);
+  // instance->PauseTimer(MyStat::TASK_COMPACTION, true);
   return status;
 }
 
@@ -1507,7 +1564,7 @@ int64_t DBImpl::TEST_MaxNextLevelOverlappingBytes() {
 
 Status DBImpl::Get(const ReadOptions& options, const Slice& key,
                    std::string* value) {
-  instance->StartTimer(MyStat::TASK_GET);
+  // instance->StartTimer(MyStat::TASK_GET);
   Status s;
   MutexLock l(&mutex_);
   SequenceNumber snapshot;
@@ -1533,39 +1590,31 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
     mutex_.Unlock();
     // First look in the memtable, then in the immutable memtable (if any).
     LookupKey lkey(key, snapshot);
+    uint64_t target_sst;
     if (mem->Get(lkey, value, &s)) {
       // Done
-      if(cbf != nullptr){
-        instance->StartTimer(MyStat::TASK_CBF);
-        cbf->AddKey(key);
-        instance->PauseTimer(MyStat::TASK_CBF, true);
-      }
     } else if (imm != nullptr && imm->Get(lkey, value, &s)) {
       // Done
-      if(cbf != nullptr){
-        instance->StartTimer(MyStat::TASK_CBF);
-        cbf->AddKey(key);
-        instance->PauseTimer(MyStat::TASK_CBF, true);
-      }
+    } else if (keyupd_lru != nullptr && keyupd_lru->FindSst(key, &target_sst)) {
+      s = current->GetByFile(options, lkey, value, &stats, target_sst);
+      have_stat_update = true;
     } else {
       s = current->Get(options, lkey, value, &stats);
-      if(s.ok() && cbf != nullptr){
-        instance->StartTimer(MyStat::TASK_CBF);
-        cbf->AddKey(key);
-        instance->PauseTimer(MyStat::TASK_CBF, true);
-      }
       have_stat_update = true;
     }
     mutex_.Lock();
   }
 
+  // if(s.ok() && cbf != nullptr){
+  //   cbf->AddKey(key);
+  // }
   if (have_stat_update && current->UpdateStats(stats)) {
     MaybeScheduleCompaction();
   }
   mem->Unref();
   if (imm != nullptr) imm->Unref();
   current->Unref();
-  instance->PauseTimer(MyStat::TASK_GET, true);
+  // instance->PauseTimer(MyStat::TASK_GET, true);
   return s;
 }
 
@@ -1608,7 +1657,7 @@ Status DBImpl::Delete(const WriteOptions& options, const Slice& key) {
 }
 
 Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
-  instance->StartTimer(MyStat::TASK_WRITE);
+  // instance->StartTimer(MyStat::TASK_WRITE);
   Writer w(&mutex_);
   w.batch = updates;
   w.sync = options.sync;
@@ -1677,7 +1726,7 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
   if (!writers_.empty()) {
     writers_.front()->cv.Signal();
   }
-  instance->PauseTimer(MyStat::TASK_WRITE, true);
+  // instance->PauseTimer(MyStat::TASK_WRITE, true);
   return status;
 }
 
@@ -1919,7 +1968,7 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
         }
         impl->cbf->InitCBF();
       }
-      impl->instance = new MyStat::Stats();
+      // impl->instance = new MyStat::Stats();
     }
 
   }

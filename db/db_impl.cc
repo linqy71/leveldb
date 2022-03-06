@@ -573,7 +573,7 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
       level = base->PickLevelForMemTableOutput(min_user_key, max_user_key);
     }
     edit->AddFile(level, meta.number, meta.file_size, meta.smallest,
-                  meta.largest);
+                  meta.largest, false);
   }
 
   if (score_tbl != nullptr && score_tbl->GetHighScoreSst().score > options_.score_threshold) {
@@ -810,7 +810,7 @@ void DBImpl::BackgroundCompaction(bool byfile) {
     if (!byfile) {
       c->edit()->RemoveFile(c->level(), f->number);
       c->edit()->AddFile(c->level() + 1, f->number, f->file_size, f->smallest,
-                        f->largest);
+                        f->largest, false);
       status = versions_->LogAndApply(c->edit(), &mutex_);
       if (!status.ok()) {
         RecordBackgroundError(status);
@@ -1055,12 +1055,12 @@ Status DBImpl::InstallCompactionResults(CompactionState* compact) {
   // Add compaction outputs
   compact->compaction->AddInputDeletions(compact->compaction->edit());
   const int level = compact->compaction->level();
-  for (size_t l = 0; l < 2; l++) { // level0 and level 1
+  for (size_t l = 0; l < config::kNumLevelsOfHot; l++) { // level0 and level 1
     for (size_t i = 0; i < compact->outputs_hot[l].size(); i++) {
       const CompactionState::Output& out = compact->outputs_hot[l][i];
       // int t_level = level - out.hot_rank >= 0 ? (level - out.hot_rank) : 0;
       compact->compaction->edit()->AddFile(l, out.number, out.file_size,
-                                          out.smallest, out.largest);
+                                          out.smallest, out.largest, true);
       // printf("add file %d to level 0 \n", out.number);
     }
   }
@@ -1068,7 +1068,7 @@ Status DBImpl::InstallCompactionResults(CompactionState* compact) {
   for (size_t i = 0; i < compact->outputs.size(); i++) {
     const CompactionState::Output& out = compact->outputs[i];
     compact->compaction->edit()->AddFile(level + 1, out.number, out.file_size,
-                                         out.smallest, out.largest);
+                                         out.smallest, out.largest, false);
   }
   return versions_->LogAndApply(compact->compaction->edit(), &mutex_);
 }
@@ -1189,53 +1189,35 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
         in_upd_and_new = true;
       }
     }
-    
-
-    if (!drop) {
-
-      if(compact->builder == nullptr) {
-        status = OpenCompactionOutputFile(compact, false);
-        if (!status.ok()) {
-          break;
-        }
-      }
-      assert(!key.empty());
-      if (compact->builder->NumEntries() == 0) {
-        compact->current_output()->smallest.DecodeFrom(key);
-      }
-      compact->current_output()->largest.DecodeFrom(key);
-      compact->builder->Add(key, input->value());
-
-      // Close output file if it is big enough
-      if (compact->builder->FileSize() >=
-          compact->compaction->MaxOutputFileSize()) {
-        status = FinishCompactionOutputFile(compact, input);
-        if (!status.ok()) {
-          break;
-        }
-      }
-
-      //should update keyupd_lru
-      if (keyupd_lru != nullptr) {
-        Slice user_k = ExtractUserKey(key);
-        keyupd_lru->CompareAndUpdateSst(user_k, cur_file_num, compact->current_output()->number);
-      }
-
-      int hot = -1; // hot level , target level
-      //hotest to level 0, slightly hot to level 1
+    int hot = -1; // hot level , target level
+    if (!drop && cbf != nullptr) {
+       //hotest to level 0, slightly hot to level 1
       if (cbf != nullptr && cbf->KeyCounter(ikey.user_key) >= 10) { // the threshold is to be determined
+        // printf("hot 0\n");
         hot = 0;
       } else if (cbf != nullptr && cbf->KeyCounter(ikey.user_key) >= 5) {
+        // printf("hot 1\n");
         hot = 1;
       }
-
       // key not found in upd table
       // see if level 0 have the same key
-      if ((!in_upd_and_new) && (hot == 0)) {
-        printf("see if level 0 have the same key\n");
-      } else if ((!in_upd_and_new) && (hot == 1)) { //see if 
-        printf("see if level 1 have the same key\n");
+      auto level = compact->compaction->level();
+      bool need_checkout_0 = (!in_upd_and_new) && (hot == 0) && (level > 0);
+      bool need_checkout_1 = (!in_upd_and_new) && (hot == 1) && (level > 1);
+      if (need_checkout_0 || need_checkout_1) {
+        SequenceNumber snapshot = versions_->LastSequence();
+        LookupKey lkey(current_user_key, snapshot);
+        string tmp;
+        Version::GetStats tmp_stat;
+        bool found = versions_->current()->CheckKeyExist(ReadOptions(), lkey, &tmp, &tmp_stat, level);
+        if (found) {
+          // printf("found the same key before current level\n");
+          drop = true;
+        }
       }
+    }
+
+    if (!drop) {
 
       // Open output file if necessary
       if (hot != -1) {
@@ -1268,7 +1250,7 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
         }
       } else {
         if(compact->builder == nullptr) {
-          status = OpenCompactionOutputFile(compact, false);
+          status = OpenCompactionOutputFile(compact, -1);
           if (!status.ok()) {
             break;
           }

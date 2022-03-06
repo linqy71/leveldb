@@ -79,6 +79,8 @@ class Version {
              GetStats* stats);
   Status GetByFile(const ReadOptions&, const LookupKey& key, std::string* val,
              GetStats* stats, uint64_t& file_num);
+  bool CheckKeyExist(const ReadOptions& options, const LookupKey& k,
+                    std::string* value, GetStats* stats, int max_level);
 
   // Adds "stats" into the current state.  Returns true if a new
   // compaction may need to be triggered, false otherwise.
@@ -101,6 +103,13 @@ class Version {
       const InternalKey* begin,  // nullptr means before all keys
       const InternalKey* end,    // nullptr means after all keys
       std::vector<FileMetaData*>* inputs);
+  
+  void GetOverlappingInputsHot(
+      int level,
+      const InternalKey* begin,  // nullptr means before all keys
+      const InternalKey* end,    // nullptr means after all keys
+      std::vector<FileMetaData*>* inputs);
+
 
   // Returns true iff some file in the specified level overlaps
   // some part of [*smallest_user_key,*largest_user_key].
@@ -114,7 +123,8 @@ class Version {
   int PickLevelForMemTableOutput(const Slice& smallest_user_key,
                                  const Slice& largest_user_key);
 
-  int NumFiles(int level) const { return files_[level].size(); }
+  int NumFiles(int level) const { return level < config::kNumLevelsOfHot? files_[level].size() + hot_files_[level].size()
+                                  : files_[level].size(); }
 
   // Return a human readable string that describes this version's contents.
   std::string DebugString() const;
@@ -150,6 +160,9 @@ class Version {
   void ForEachOverlapping(Slice user_key, Slice internal_key, void* arg,
                           bool (*func)(void*, int, FileMetaData*));
 
+  void ForLevelCheck(Slice user_key, Slice internal_key, void* arg,
+                                 bool (*func)(void*, int, FileMetaData*), int max_level);
+
   void ForFile(Slice user_key, uint64_t& file_num, void* arg,
                           bool (*func)(void*, int, FileMetaData*));
 
@@ -160,6 +173,8 @@ class Version {
 
   // List of files per level
   std::vector<FileMetaData*> files_[config::kNumLevels];
+  // List of hot files per level
+  std::vector<FileMetaData*> hot_files_[config::kNumLevelsOfHot];
   std::unordered_map<uint64_t, int> file_to_level;
 
   // Next file to compact based on seek stats.

@@ -176,6 +176,8 @@ class DBImpl : public DB {
 
   // table_cache_ provides its own synchronization
   TableCache* const table_cache_;
+  int cache_hit_cnt;
+  int cnt;
 
   // Lock over the persistent DB state.  Non-null iff successfully acquired.
   FileLock* db_lock_;

@@ -150,6 +150,64 @@ static void ReleaseBlock(void* arg, void* h) {
 
 // Convert an index iterator value (i.e., an encoded BlockHandle)
 // into an iterator over the contents of the corresponding block.
+Iterator* Table::BlockReaderWithCounter(void* arg, const ReadOptions& options,
+                             const Slice& index_value, bool& cache_hit) {
+  Table* table = reinterpret_cast<Table*>(arg);
+  Cache* block_cache = table->rep_->options.block_cache;
+  Block* block = nullptr;
+  Cache::Handle* cache_handle = nullptr;
+
+  BlockHandle handle;
+  Slice input = index_value;
+  Status s = handle.DecodeFrom(&input);
+  // We intentionally allow extra stuff in index_value so that we
+  // can add more features in the future.
+
+  if (s.ok()) {
+    BlockContents contents;
+    if (block_cache != nullptr) {
+      char cache_key_buffer[16];
+      EncodeFixed64(cache_key_buffer, table->rep_->cache_id);
+      EncodeFixed64(cache_key_buffer + 8, handle.offset());
+      Slice key(cache_key_buffer, sizeof(cache_key_buffer));
+      cache_handle = block_cache->Lookup(key);
+      if (cache_handle != nullptr) {
+        block = reinterpret_cast<Block*>(block_cache->Value(cache_handle));
+        cache_hit = true;
+      } else {
+        s = ReadBlock(table->rep_->file, options, handle, &contents);
+        if (s.ok()) {
+          block = new Block(contents);
+          if (contents.cachable && options.fill_cache) {
+            cache_handle = block_cache->Insert(key, block, block->size(),
+                                               &DeleteCachedBlock);
+          }
+        }
+      }
+    } else {
+      s = ReadBlock(table->rep_->file, options, handle, &contents);
+      if (s.ok()) {
+        block = new Block(contents);
+      }
+    }
+  }
+
+  Iterator* iter;
+  if (block != nullptr) {
+    iter = block->NewIterator(table->rep_->options.comparator);
+    if (cache_handle == nullptr) {
+      iter->RegisterCleanup(&DeleteBlock, block, nullptr);
+    } else {
+      iter->RegisterCleanup(&ReleaseBlock, block_cache, cache_handle);
+    }
+  } else {
+    iter = NewErrorIterator(s);
+  }
+  return iter;
+}
+
+// Convert an index iterator value (i.e., an encoded BlockHandle)
+// into an iterator over the contents of the corresponding block.
 Iterator* Table::BlockReader(void* arg, const ReadOptions& options,
                              const Slice& index_value) {
   Table* table = reinterpret_cast<Table*>(arg);
@@ -226,6 +284,36 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
       // Not found
     } else {
       Iterator* block_iter = BlockReader(this, options, iiter->value());
+      block_iter->Seek(k);
+      if (block_iter->Valid()) {
+        (*handle_result)(arg, block_iter->key(), block_iter->value());
+      }
+      s = block_iter->status();
+      delete block_iter;
+    }
+  }
+  if (s.ok()) {
+    s = iiter->status();
+  }
+  delete iiter;
+  return s;
+}
+
+Status Table::InternalGetWithCounter(const ReadOptions& options, const Slice& k, void* arg,
+                          void (*handle_result)(void*, const Slice&,
+                                                const Slice&), bool& cache_hit) {
+  Status s;
+  Iterator* iiter = rep_->index_block->NewIterator(rep_->options.comparator);
+  iiter->Seek(k);
+  if (iiter->Valid()) {
+    Slice handle_value = iiter->value();
+    FilterBlockReader* filter = rep_->filter;
+    BlockHandle handle;
+    if (filter != nullptr && handle.DecodeFrom(&handle_value).ok() &&
+        !filter->KeyMayMatch(handle.offset(), k)) {
+      // Not found
+    } else {
+      Iterator* block_iter = BlockReaderWithCounter(this, options, iiter->value(), cache_hit);
       block_iter->Seek(k);
       if (block_iter->Valid()) {
         (*handle_result)(arg, block_iter->key(), block_iter->value());

@@ -145,6 +145,8 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       owns_cache_(options_.block_cache != raw_options.block_cache),
       dbname_(dbname),
       table_cache_(new TableCache(dbname_, options_, TableCacheSize(options_))),
+      cache_hit_cnt(0),
+      cnt(0),
       db_lock_(nullptr),
       shutting_down_(false),
       background_work_finished_signal_(&mutex_),
@@ -199,6 +201,7 @@ DBImpl::~DBImpl() {
   if (owns_cache_) {
     delete options_.block_cache;
   }
+  printf("close db, total get: %d,  cache_hit: %d\n", cnt, cache_hit_cnt);
 }
 
 Status DBImpl::NewDB() {
@@ -1602,7 +1605,13 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
       s = current->GetByFile(options, lkey, value, &stats, target_sst);
       have_stat_update = true;
     } else {
-      s = current->Get(options, lkey, value, &stats);
+      cnt++;
+      bool cache_hit = false;
+      s = current->Get(options, lkey, value, &stats, cache_hit);
+      if (cache_hit) {
+        cache_hit_cnt++;
+      }
+
       have_stat_update = true;
     }
     mutex_.Lock();

@@ -367,6 +367,68 @@ void Version::ForEachOverlapping(Slice user_key, Slice internal_key, void* arg,
 // search hot files of level0 first
 // then cold files of level0
 // then hot files of level1
+void Version::ForEachOverlapping(Slice user_key, Slice internal_key, void* arg,
+                                 bool (*func)(void*, int, FileMetaData*, bool&), bool& cache_hit) {
+  const Comparator* ucmp = vset_->icmp_.user_comparator();
+
+  // Search level-0 hot files in order from newest to oldest.
+  std::vector<FileMetaData*> tmp;
+  tmp.reserve(hot_files_[0].size() + files_[0].size() + hot_files_[1].size());
+  for (uint32_t i = 0; i < hot_files_[0].size(); i++) {
+    FileMetaData* f = hot_files_[0][i];
+    if (ucmp->Compare(user_key, f->smallest.user_key()) >= 0 &&
+        ucmp->Compare(user_key, f->largest.user_key()) <= 0) {
+      tmp.push_back(f);
+    }
+  }
+  // Search level-0 cold files in order from newest to oldest.
+  for (uint32_t i = 0; i < files_[0].size(); i++) {
+    FileMetaData* f = files_[0][i];
+    if (ucmp->Compare(user_key, f->smallest.user_key()) >= 0 &&
+        ucmp->Compare(user_key, f->largest.user_key()) <= 0) {
+      tmp.push_back(f);
+    }
+  }
+  // Search level-1 hot files in order from newest to oldest.
+  for (uint32_t i = 0; i < hot_files_[1].size(); i++) {
+    FileMetaData* f = hot_files_[1][i];
+    if (ucmp->Compare(user_key, f->smallest.user_key()) >= 0 &&
+        ucmp->Compare(user_key, f->largest.user_key()) <= 0) {
+      tmp.push_back(f);
+    }
+  }
+  if (!tmp.empty()) {
+    std::sort(tmp.begin(), tmp.end(), NewestFirst);
+    for (uint32_t i = 0; i < tmp.size(); i++) {
+      if (!(*func)(arg, 0, tmp[i], cache_hit)) {
+        return;
+      }
+    }
+  }
+
+  // Search other levels.
+  for (int level = 1; level < config::kNumLevels; level++) {
+    size_t num_files = files_[level].size();
+    if (num_files == 0) continue;
+
+    // Binary search to find earliest index whose largest key >= internal_key.
+    uint32_t index = FindFile(vset_->icmp_, files_[level], internal_key);
+    if (index < num_files) {
+      FileMetaData* f = files_[level][index];
+      if (ucmp->Compare(user_key, f->smallest.user_key()) < 0) {
+        // All of "f" is past any data for user_key
+      } else {
+        if (!(*func)(arg, level, f, cache_hit)) {
+          return;
+        }
+      }
+    }
+  }
+}
+
+// search hot files of level0 first
+// then cold files of level0
+// then hot files of level1
 void Version::ForLevelCheck(Slice user_key, Slice internal_key, void* arg,
                                  bool (*func)(void*, int, FileMetaData*), int max_level) {
   const Comparator* ucmp = vset_->icmp_.user_comparator();
@@ -464,7 +526,7 @@ void Version::ForFile(Slice user_key, uint64_t& file_num, void* arg,
 }
 
 Status Version::Get(const ReadOptions& options, const LookupKey& k,
-                    std::string* value, GetStats* stats) {
+                    std::string* value, GetStats* stats, bool& cache_hit) {
   stats->seek_file = nullptr;
   stats->seek_file_level = -1;
 
@@ -480,7 +542,7 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
     Status s;
     bool found;
 
-    static bool Match(void* arg, int level, FileMetaData* f) {
+    static bool Match(void* arg, int level, FileMetaData* f, bool& cache_hit) {
       State* state = reinterpret_cast<State*>(arg);
 
       if (state->stats->seek_file == nullptr &&
@@ -493,9 +555,9 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
       state->last_file_read = f;
       state->last_file_read_level = level;
 
-      state->s = state->vset->table_cache_->Get(*state->options, f->number,
+      state->s = state->vset->table_cache_->GetWithCounter(*state->options, f->number,
                                                 f->file_size, state->ikey,
-                                                &state->saver, SaveValue);
+                                                &state->saver, SaveValue, cache_hit);
       if (!state->s.ok()) {
         state->found = true;
         return false;
@@ -536,7 +598,7 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
   state.saver.user_key = k.user_key();
   state.saver.value = value;
 
-  ForEachOverlapping(state.saver.user_key, state.ikey, &state, &State::Match);
+  ForEachOverlapping(state.saver.user_key, state.ikey, &state, &State::Match, cache_hit);
 
   return state.found ? state.s : Status::NotFound(Slice());
 }

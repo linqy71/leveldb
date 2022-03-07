@@ -76,7 +76,7 @@ class Version {
   void AddIterators(const ReadOptions&, std::vector<Iterator*>* iters);
 
   Status Get(const ReadOptions&, const LookupKey& key, std::string* val,
-             GetStats* stats);
+             GetStats* stats, bool& cache_hit);
   Status GetByFile(const ReadOptions&, const LookupKey& key, std::string* val,
              GetStats* stats, uint64_t& file_num);
   bool CheckKeyExist(const ReadOptions& options, const LookupKey& k,
@@ -159,6 +159,9 @@ class Version {
   // REQUIRES: user portion of internal_key == user_key.
   void ForEachOverlapping(Slice user_key, Slice internal_key, void* arg,
                           bool (*func)(void*, int, FileMetaData*));
+  
+  void ForEachOverlapping(Slice user_key, Slice internal_key, void* arg,
+                          bool (*func)(void*, int, FileMetaData*, bool&), bool& cache_hit);
 
   void ForLevelCheck(Slice user_key, Slice internal_key, void* arg,
                                  bool (*func)(void*, int, FileMetaData*), int max_level);

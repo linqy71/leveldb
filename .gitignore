@@ -6,4 +6,5 @@
 # Build directory.
 build/
 out/
+*build/
 ac_build/

@@ -1871,6 +1871,9 @@ Compaction* VersionSet::PickCompactionByFile(uint64_t target_num) {
   Compaction* c = nullptr;
   
   auto it = current_->file_to_level.find(target_num);
+  if(it == current_->file_to_level.end()) {
+    return nullptr;
+  }
   assert(it != current_->file_to_level.end() && it->second < config::kNumLevels);
 
   int level = it->second;

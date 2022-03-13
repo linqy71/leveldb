@@ -146,6 +146,7 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       dbname_(dbname),
       table_cache_(new TableCache(dbname_, options_, TableCacheSize(options_))),
       cache_hit_cnt(0),
+      upd_hit_cnt(0),
       cnt(0),
       db_lock_(nullptr),
       shutting_down_(false),
@@ -201,7 +202,7 @@ DBImpl::~DBImpl() {
   if (owns_cache_) {
     delete options_.block_cache;
   }
-  printf("close db, total get: %d,  cache_hit: %d\n", cnt, cache_hit_cnt);
+  printf("close db, total get: %d, upd hit:%d,  cache_hit: %d\n", cnt, upd_hit_cnt, cache_hit_cnt);
 }
 
 Status DBImpl::NewDB() {
@@ -1195,10 +1196,10 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
     int hot = -1; // hot level , target level
     if (!drop && cbf != nullptr) {
        //hotest to level 0, slightly hot to level 1
-      if (cbf != nullptr && cbf->KeyCounter(ikey.user_key) >= 10) { // the threshold is to be determined
+      if (cbf != nullptr && cbf->KeyCounter(ikey.user_key) >= 14) { // the threshold is to be determined
         // printf("hot 0\n");
         hot = 0;
-      } else if (cbf != nullptr && cbf->KeyCounter(ikey.user_key) >= 5) {
+      } else if (cbf != nullptr && cbf->KeyCounter(ikey.user_key) >= 9) {
         // printf("hot 1\n");
         hot = 1;
       }
@@ -1591,6 +1592,8 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
   bool have_stat_update = false;
   Version::GetStats stats;
 
+  cnt++;
+
   // Unlock while reading from files and memtables
   {
     mutex_.Unlock();
@@ -1604,8 +1607,8 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
     } else if (keyupd_lru != nullptr && keyupd_lru->FindSst(key, &target_sst)) {
       s = current->GetByFile(options, lkey, value, &stats, target_sst);
       have_stat_update = true;
+      upd_hit_cnt++;
     } else {
-      cnt++;
       bool cache_hit = false;
       s = current->Get(options, lkey, value, &stats, cache_hit);
       if (cache_hit) {

@@ -65,6 +65,7 @@ class LEVELDB_EXPORT Table {
   static Iterator* BlockReaderWithCounter(void* arg, const ReadOptions& options,
                              const Slice& index_value, bool& cache_hit);
   static Iterator* BlockReader(void*, const ReadOptions&, const Slice&);
+  static Iterator* BlockReader(void*, const ReadOptions&, const Slice&, bool& cache_hit);
 
   explicit Table(Rep* rep) : rep_(rep) {}
 
@@ -74,6 +75,10 @@ class LEVELDB_EXPORT Table {
   Status InternalGet(const ReadOptions&, const Slice& key, void* arg,
                      void (*handle_result)(void* arg, const Slice& k,
                                            const Slice& v));
+
+  Status InternalGet(const ReadOptions&, const Slice& key, void* arg,
+                     void (*handle_result)(void* arg, const Slice& k,
+                                           const Slice& v), bool& cache_hit);                                         
                           
   Status InternalGetWithCounter(const ReadOptions& options, const Slice& k, void* arg,
                           void (*handle_result)(void*, const Slice&,

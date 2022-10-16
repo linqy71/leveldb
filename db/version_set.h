@@ -77,6 +77,8 @@ class Version {
 
   Status Get(const ReadOptions&, const LookupKey& key, std::string* val,
              GetStats* stats);
+  Status Get(const ReadOptions&, const LookupKey& key, std::string* val,
+             GetStats* stats, bool& cache_hit);
   Status GetByFile(const ReadOptions&, const LookupKey& key, std::string* val,
              GetStats* stats, uint64_t& file_num);
   bool CheckKeyExist(const ReadOptions& options, const LookupKey& k,

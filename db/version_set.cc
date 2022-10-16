@@ -526,6 +526,84 @@ void Version::ForFile(Slice user_key, uint64_t& file_num, void* arg,
 }
 
 Status Version::Get(const ReadOptions& options, const LookupKey& k,
+                    std::string* value, GetStats* stats, bool& cache_hit) {
+  stats->seek_file = nullptr;
+  stats->seek_file_level = -1;
+
+  struct State {
+    Saver saver;
+    GetStats* stats;
+    const ReadOptions* options;
+    Slice ikey;
+    FileMetaData* last_file_read;
+    int last_file_read_level;
+
+    VersionSet* vset;
+    Status s;
+    bool found;
+
+    static bool Match(void* arg, int level, FileMetaData* f, bool& cache_hit) {
+      State* state = reinterpret_cast<State*>(arg);
+
+      if (state->stats->seek_file == nullptr &&
+          state->last_file_read != nullptr) {
+        // We have had more than one seek for this read.  Charge the 1st file.
+        state->stats->seek_file = state->last_file_read;
+        state->stats->seek_file_level = state->last_file_read_level;
+      }
+
+      state->last_file_read = f;
+      state->last_file_read_level = level;
+
+      state->s = state->vset->table_cache_->Get(*state->options, f->number,
+                                                f->file_size, state->ikey,
+                                                &state->saver, SaveValue, cache_hit);
+      if (!state->s.ok()) {
+        state->found = true;
+        return false;
+      }
+      switch (state->saver.state) {
+        case kNotFound:
+          return true;  // Keep searching in other files
+        case kFound:
+          state->found = true;
+          return false;
+        case kDeleted:
+          return false;
+        case kCorrupt:
+          state->s =
+              Status::Corruption("corrupted key for ", state->saver.user_key);
+          state->found = true;
+          return false;
+      }
+
+      // Not reached. Added to avoid false compilation warnings of
+      // "control reaches end of non-void function".
+      return false;
+    }
+  };
+
+  State state;
+  state.found = false;
+  state.stats = stats;
+  state.last_file_read = nullptr;
+  state.last_file_read_level = -1;
+
+  state.options = &options;
+  state.ikey = k.internal_key();
+  state.vset = vset_;
+
+  state.saver.state = kNotFound;
+  state.saver.ucmp = vset_->icmp_.user_comparator();
+  state.saver.user_key = k.user_key();
+  state.saver.value = value;
+
+  ForEachOverlapping(state.saver.user_key, state.ikey, &state, &State::Match, cache_hit);
+
+  return state.found ? state.s : Status::NotFound(Slice());
+}
+
+Status Version::Get(const ReadOptions& options, const LookupKey& k,
                     std::string* value, GetStats* stats) {
   stats->seek_file = nullptr;
   stats->seek_file_level = -1;
@@ -1277,6 +1355,7 @@ Status VersionSet::LogAndApply(VersionEdit* edit, port::Mutex* mu) {
     Builder builder(this, current_);
     builder.Apply(edit);
     builder.SaveTo(v);
+    builder.SaveHotFileTo(v);
   }
   Finalize(v);
 

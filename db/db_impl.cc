@@ -35,6 +35,8 @@
 #include "util/logging.h"
 #include "util/mutexlock.h"
 
+// #define COUNT_HIT_RATIO 1
+
 namespace leveldb {
 
 const int kNumNonTableCacheFiles = 10;
@@ -145,6 +147,7 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       owns_cache_(options_.block_cache != raw_options.block_cache),
       dbname_(dbname),
       table_cache_(new TableCache(dbname_, options_, TableCacheSize(options_))),
+      cache_hit_cnt(0),
       upd_hit_cnt(0),
       cnt(0),
       db_lock_(nullptr),
@@ -201,7 +204,7 @@ DBImpl::~DBImpl() {
   if (owns_cache_) {
     delete options_.block_cache;
   }
-  // printf("close db, total get: %d, upd hit:%d,  cache_hit: %d\n", cnt, upd_hit_cnt, cache_hit_cnt);
+  printf("close db, total get: %d, upd hit:%d,  cache_hit: %d\n", cnt, upd_hit_cnt, cache_hit_cnt);
 }
 
 Status DBImpl::NewDB() {
@@ -1195,10 +1198,10 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
     int hot = -1; // hot level , target level
     if (!drop && cbf != nullptr) {
        //hotest to level 0, slightly hot to level 1
-      if (cbf != nullptr && cbf->KeyCounter(ikey.user_key) >= 14) { // the threshold is to be determined
+      if (cbf != nullptr && cbf->KeyCounter(ikey.user_key) >= options_.hot_thres) { // the threshold is to be determined
         // printf("hot 0\n");
         hot = 0;
-      } else if (cbf != nullptr && cbf->KeyCounter(ikey.user_key) >= 9) {
+      } else if (cbf != nullptr && cbf->KeyCounter(ikey.user_key) >= options_.warm_thres) {
         // printf("hot 1\n");
         hot = 1;
       }
@@ -1324,13 +1327,16 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
   for (size_t i = 0; i < compact->outputs.size(); i++) {
     stats.bytes_written += compact->outputs[i].file_size;
   }
-  // for (size_t i = 0; i < compact->outputs_hot.size(); i++) {
-  //   stats.bytes_written += compact->outputs_hot[i].file_size;
-  // }
+  for (size_t l = 0; l < config::kNumLevelsOfHot; l++) {
+    for (size_t i = 0; i < compact->outputs_hot[l].size(); i++) {
+      stats.bytes_written_hot[l] += compact->outputs_hot[l][i].file_size;
+    }
+  }
+  
 
   mutex_.Lock();
   stats_[compact->compaction->level() + 1].Add(stats);
-
+  
   if (status.ok()) {
     status = InstallCompactionResults(compact);
   }
@@ -1607,13 +1613,16 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
       s = current->GetByFile(options, lkey, value, &stats, target_sst);
       have_stat_update = true;
       upd_hit_cnt++;
-    } else {
-      // bool cache_hit = false;
+    } else {    
+#ifdef COUNT_HIT_RATIO
+      bool cache_hit = false;
+      s = current->Get(options, lkey, value, &stats, cache_hit);
+      if (cache_hit) {
+        cache_hit_cnt++;
+      }
+#else
       s = current->Get(options, lkey, value, &stats);
-      // if (cache_hit) {
-      //   cache_hit_cnt++;
-      // }
-
+#endif
       have_stat_update = true;
     }
     mutex_.Lock();
@@ -1890,11 +1899,15 @@ bool DBImpl::GetProperty(const Slice& property, std::string* value) {
     for (int level = 0; level < config::kNumLevels; level++) {
       int files = versions_->NumLevelFiles(level);
       if (stats_[level].micros > 0 || files > 0) {
+        uint64_t bytes_written = stats_[level].bytes_written;
+        if (level < config::kNumLevelsOfHot) {
+          bytes_written += stats_[level].bytes_written_hot[level];
+        }
         std::snprintf(buf, sizeof(buf), "%3d %8d %8.0f %9.0f %8.0f %9.0f\n",
                       level, files, versions_->NumLevelBytes(level) / 1048576.0,
                       stats_[level].micros / 1e6,
                       stats_[level].bytes_read / 1048576.0,
-                      stats_[level].bytes_written / 1048576.0);
+                      bytes_written / 1048576.0);
         value->append(buf);
       }
     }

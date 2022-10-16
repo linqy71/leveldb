@@ -87,10 +87,15 @@ struct LEVELDB_EXPORT Options {
   int max_open_files = 1000;
 
   bool CBF_ON = true;
-
   bool UPD_ON = true;
   int score_threshold = 1000;
   int upd_table_size = 64; // MB
+
+  int hot_thres = 12;
+  int warm_thres = 7;
+
+  // if true, will output cache hit count when delete db
+  // bool count_cache_hit = false;
 
   // Control over blocks (user data is stored in a set of blocks, and
   // a block is the unit of reading from disk).

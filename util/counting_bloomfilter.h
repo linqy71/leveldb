@@ -2,6 +2,8 @@
 
 #include "leveldb/slice.h"
 #include "util/hash.h"
+#include <mutex>
+#include <shared_mutex>
 
 namespace leveldb{
 
@@ -32,6 +34,9 @@ class CountingBloomFilter {
     size_t bytes = (bits + 7) / 8;
     bits = bytes * 8;
     uint32_t h = BloomHash(key);
+    
+    // Write lock
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     char* array = &(*dst)[0];
     const uint32_t delta = (h >> 17) | (h << 15); 
     for(size_t j = 0; j < cnter_per_key_; j++){
@@ -73,6 +78,8 @@ class CountingBloomFilter {
   }
 
   int KeyCounter(const Slice& key){
+    // Reader lock
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     const size_t len = filter_.size();
     if (len < 2) return 0;
 
@@ -105,6 +112,7 @@ class CountingBloomFilter {
 
 
  private:
+  mutable std::shared_mutex mutex_;
   int cnter_per_key_;
   std::string filter_;
   int capacity_;

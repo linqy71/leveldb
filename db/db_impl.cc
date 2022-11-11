@@ -163,7 +163,6 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       keyupd_lru(nullptr),
       score_tbl(nullptr),
       cbf(nullptr),
-      instance(nullptr),
       tmp_batch_(new WriteBatch),
       background_compaction_scheduled_(false),
       active_compaction_scheduled_(false),
@@ -195,9 +194,6 @@ DBImpl::~DBImpl() {
   delete keyupd_lru;
   delete score_tbl;
   delete cbf;
-  if(instance != nullptr)
-    delete instance;
-
   if (owns_info_log_) {
     delete options_.info_log;
   }
@@ -1213,7 +1209,7 @@ Status DBImpl::DoActiveCompactionWork(CompactionState* compact) {
       if (need_checkout_0 || need_checkout_1) {
         SequenceNumber snapshot = versions_->LastSequence();
         LookupKey lkey(current_user_key, snapshot);
-        string tmp;
+        std::string tmp;
         Version::GetStats tmp_stat;
         bool found = versions_->current()->CheckKeyExist(ReadOptions(), lkey, &tmp, &tmp_stat, level);
         if (found) {

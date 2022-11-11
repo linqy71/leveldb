@@ -198,11 +198,6 @@ target_sources(leveldb
     "util/status.cc"
     "util/counting_bloomfilter.h"
 
-    "stats/timer.h"
-    "stats/timer.cc"
-    "stats/stats.h"
-    "stats/stats.cc"
-
   # Only CMake 3.3+ supports PUBLIC sources in targets exported by "install".
   $<$<VERSION_GREATER:CMAKE_VERSION,3.2>:PUBLIC>
     "${LEVELDB_PUBLIC_INCLUDE_DIR}/c.h"

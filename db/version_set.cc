@@ -45,7 +45,7 @@ static double MaxBytesForLevel(const Options* options, int level) {
   // the level-0 compaction threshold based on number of files.
 
   // Result for both level-0 and level-1
-  double result = 10. * 1048576.0;
+  double result = 30. * 1048576.0;
   while (level > 1) {
     result *= 10;
     level--;
@@ -502,7 +502,7 @@ void Version::ForFile(Slice user_key, uint64_t& file_num, void* arg,
 
   if(target_level < config::kNumLevelsOfHot) {
     for (uint32_t i = 0; i < hot_files_[target_level].size(); i++) {
-      FileMetaData* f = files_[target_level][i];
+      FileMetaData* f = hot_files_[target_level][i];
       if (f->number == file_num) {
         target = f;
       }

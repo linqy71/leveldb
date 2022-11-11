@@ -20,7 +20,6 @@
 #include "db/keyupd_lru.h"
 #include "util/counting_bloomfilter.h"
 
-#include "stats/stats.h"
 
 namespace leveldb {
 
@@ -206,7 +205,6 @@ class DBImpl : public DB {
   KeyUpdLru* keyupd_lru;
   ScoreTable* score_tbl;
   CountingBloomFilter* cbf;
-  MyStat::Stats* instance;
 
   // Queue of writers.
   std::deque<Writer*> writers_ GUARDED_BY(mutex_);
